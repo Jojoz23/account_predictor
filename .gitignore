@@ -1,0 +1,62 @@
+# Data files (keep your transaction data private)
+data/*.csv
+data/*.xlsx
+data/*.xls
+data/*.json
+data/raw/
+data/processed/
+
+# Model files (can be large and regenerated)
+models/*.pkl
+models/*.joblib
+models/*.h5
+models/*.model
+
+# Results and outputs
+results/*.png
+results/*.jpg
+results/*.pdf
+results/*.html
+
+# Jupyter notebook checkpoints
+.ipynb_checkpoints/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Virtual environments
+venv/
+env/
+ENV/
+.venv/
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Temporary files
+*.tmp
+*.temp
+temp/
+
+# Environment variables (if you add any)
+.env
+.env.local
+
+# Large files that shouldn't be in git
+*.zip
+*.tar.gz
+*.rar
