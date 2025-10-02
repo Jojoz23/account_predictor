@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Batch Account Predictor
+Batch Account Predictor - Simple Version
 Predicts account categories for multiple transactions from an Excel/CSV file
 """
 
@@ -74,50 +74,39 @@ def predict_batch(input_file, output_file=None):
         class_names = model_package['class_names']
         print("Model loaded successfully!")
     except FileNotFoundError:
-        print("❌ Model file not found! Please run the neural network training notebook first.")
+        print("ERROR: Model file not found! Please run the neural network training notebook first.")
         return
     except Exception as e:
-        print(f"❌ Error loading model: {e}")
+        print(f"ERROR loading model: {e}")
         return
     
     # Load input data
     print(f"\nLoading data from: {input_file}")
     try:
         if input_file.endswith('.xlsx') or input_file.endswith('.xls'):
-            # Try different encodings for Excel files
-            try:
-                df = pd.read_excel(input_file)
-                print("✅ Excel file loaded successfully!")
-            except Exception as e:
-                print(f"❌ Error loading Excel file: {e}")
-                return
+            df = pd.read_excel(input_file)
+            print("Excel file loaded successfully!")
         elif input_file.endswith('.csv'):
-            # Try different encodings for CSV files
             try:
                 df = pd.read_csv(input_file, encoding='utf-8')
-                print("✅ CSV file loaded successfully!")
+                print("CSV file loaded successfully!")
             except UnicodeDecodeError:
-                try:
-                    df = pd.read_csv(input_file, encoding='latin-1')
-                    print("✅ CSV file loaded with latin-1 encoding!")
-                except Exception as e:
-                    print(f"❌ Error loading CSV file: {e}")
-                    return
+                df = pd.read_csv(input_file, encoding='latin-1')
+                print("CSV file loaded with latin-1 encoding!")
         else:
-            print("❌ Unsupported file format. Please use .xlsx, .xls, or .csv files.")
+            print("ERROR: Unsupported file format. Please use .xlsx, .xls, or .csv files.")
             return
             
     except Exception as e:
-        print(f"❌ Error loading file: {e}")
+        print(f"ERROR loading file: {e}")
         return
     
-    print(f"📊 Loaded {len(df)} transactions")
+    print(f"Loaded {len(df)} transactions")
     print(f"Columns: {list(df.columns)}")
     
     # Check for bookkeeping format (Withdrawals/Deposits) or standard format (Amount)
     if 'Withdrawals' in df.columns and 'Deposits' in df.columns:
-        print("📋 Detected bookkeeping format (Withdrawals/Deposits)")
-        # Convert bookkeeping format to standard format
+        print("Detected bookkeeping format (Withdrawals/Deposits)")
         print("Converting bookkeeping format to standard format...")
         
         # Create Amount column: Deposits are positive, Withdrawals are negative
@@ -126,7 +115,7 @@ def predict_batch(input_file, output_file=None):
         # Remove rows where both Withdrawals and Deposits are empty/zero
         df = df[df['Amount'] != 0]
         
-        print(f"📊 After conversion: {len(df)} transactions with non-zero amounts")
+        print(f"After conversion: {len(df)} transactions with non-zero amounts")
         
         # Show amount distribution
         positive_count = (df['Amount'] > 0).sum()
@@ -135,9 +124,9 @@ def predict_batch(input_file, output_file=None):
         print(f"  Withdrawals (negative): {negative_count}")
         
     elif 'Amount' in df.columns:
-        print("📋 Detected standard format (Amount)")
+        print("Detected standard format (Amount)")
     else:
-        print("❌ Unsupported format. Expected either:")
+        print("ERROR: Unsupported format. Expected either:")
         print("  - Bookkeeping format: Date, Description, Withdrawals, Deposits, Balance")
         print("  - Standard format: Date, Description, Amount")
         return
@@ -146,7 +135,7 @@ def predict_batch(input_file, output_file=None):
     required_columns = ['Date', 'Description', 'Amount']
     missing_columns = [col for col in required_columns if col not in df.columns]
     if missing_columns:
-        print(f"❌ Missing required columns: {missing_columns}")
+        print(f"ERROR: Missing required columns: {missing_columns}")
         return
     
     # Clean and prepare data
@@ -156,13 +145,13 @@ def predict_batch(input_file, output_file=None):
     original_count = len(df)
     df = df.dropna(subset=['Date', 'Description', 'Amount'])
     if len(df) < original_count:
-        print(f"⚠️ Removed {original_count - len(df)} rows with missing data")
+        print(f"Removed {original_count - len(df)} rows with missing data")
     
     # Convert Date to datetime
     df['Date'] = pd.to_datetime(df['Date'], errors='coerce')
     date_na = df['Date'].isna()
     if date_na.any():
-        print(f"⚠️ Removing {date_na.sum()} rows with invalid dates")
+        print(f"Removing {date_na.sum()} rows with invalid dates")
         df = df[~date_na]
     
     # Clean Amount column
@@ -170,10 +159,10 @@ def predict_batch(input_file, output_file=None):
     df['Amount'] = pd.to_numeric(df['Amount'], errors='coerce')
     amount_na = df['Amount'].isna()
     if amount_na.any():
-        print(f"⚠️ Removing {amount_na.sum()} rows with invalid amounts")
+        print(f"Removing {amount_na.sum()} rows with invalid amounts")
         df = df[~amount_na]
     
-    print(f"📊 Processing {len(df)} valid transactions")
+    print(f"Processing {len(df)} valid transactions")
     
     # Create features
     df = create_features(df)
@@ -216,7 +205,7 @@ def predict_batch(input_file, output_file=None):
     df['Top_3_Predictions'] = top_3_predictions
     
     # Display results
-    print("\n🎯 PREDICTION RESULTS:")
+    print("\nPREDICTION RESULTS:")
     print("="*50)
     
     # Show prediction distribution
@@ -238,7 +227,7 @@ def predict_batch(input_file, output_file=None):
     for i in range(min(5, len(df))):
         row = df.iloc[i]
         print(f"{i+1}. {row['Description']} (${row['Amount']})")
-        print(f"   → {row['Predicted_Account']} ({row['Confidence']:.1%} confidence)")
+        print(f"   -> {row['Predicted_Account']} ({row['Confidence']:.1%} confidence)")
         top_3 = row['Top_3_Predictions']
         print(f"   Top 3: {', '.join([f'{acc}: {prob:.1%}' for acc, prob in top_3])}")
         print()
@@ -254,7 +243,7 @@ def predict_batch(input_file, output_file=None):
         else:
             output_file = input_file + '_predicted.xlsx'
     
-    print(f"💾 Saving results to: {output_file}")
+    print(f"Saving results to: {output_file}")
     
     # Prepare output dataframe
     # Include original bookkeeping columns if they exist
@@ -279,23 +268,23 @@ def predict_batch(input_file, output_file=None):
             output_df.to_excel(output_file, index=False)
         else:
             output_df.to_csv(output_file, index=False)
-        print("✅ Results saved successfully!")
+        print("Results saved successfully!")
     except Exception as e:
-        print(f"❌ Error saving results: {e}")
+        print(f"ERROR saving results: {e}")
         return
     
-    print(f"\n🎉 BATCH PREDICTION COMPLETE!")
-    print(f"📊 Processed: {len(df)} transactions")
-    print(f"💾 Results saved to: {output_file}")
-    print(f"📈 Average confidence: {df['Confidence'].mean():.1%}")
+    print(f"\nBATCH PREDICTION COMPLETE!")
+    print(f"Processed: {len(df)} transactions")
+    print(f"Results saved to: {output_file}")
+    print(f"Average confidence: {df['Confidence'].mean():.1%}")
 
 if __name__ == "__main__":
     import sys
     
     if len(sys.argv) < 2:
-        print("Usage: python batch_predict.py <input_file> [output_file]")
-        print("Example: python batch_predict.py data/Bookkeeping 2025.xlsx")
-        print("Example: python batch_predict.py data/transactions.csv data/results.xlsx")
+        print("Usage: python batch_predict_simple.py <input_file> [output_file]")
+        print("Example: python batch_predict_simple.py \"data/Bookkeeping 2025.xlsx\"")
+        print("Example: python batch_predict_simple.py data/transactions.csv data/results.xlsx")
         print("\nSupported formats:")
         print("  - Bookkeeping format: Date, Description, Withdrawals, Deposits, Balance")
         print("  - Standard format: Date, Description, Amount")
@@ -305,3 +294,4 @@ if __name__ == "__main__":
     output_file = sys.argv[2] if len(sys.argv) > 2 else None
     
     predict_batch(input_file, output_file)
+
