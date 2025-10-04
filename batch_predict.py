@@ -9,13 +9,16 @@ import numpy as np
 import joblib
 import re
 import warnings
+import wordninja
 warnings.filterwarnings('ignore')
 
 def clean_text(text):
-    """Clean transaction descriptions for TF-IDF"""
+    """Clean transaction descriptions"""
     if pd.isna(text):
         return ""
-    text = str(text).lower()
+    words = wordninja.split(str(text))
+    text = ' '.join(words)
+    text = text.lower()
     text = re.sub(r'[^a-zA-Z0-9\s]', ' ', text)
     text = ' '.join(text.split())
     return text
