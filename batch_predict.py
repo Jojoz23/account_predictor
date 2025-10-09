@@ -84,6 +84,7 @@ def predict_batch(input_file, output_file=None):
         tfidf = model_package['tfidf_vectorizer']
         basic_features = model_package['feature_columns']
         class_names = model_package['class_names']
+        feature_columns_full = model_package['feature_columns_full']
         print("Model loaded successfully!")
     except FileNotFoundError:
         print("❌ Model file not found! Please run the neural network training notebook first.")
@@ -202,6 +203,8 @@ def predict_batch(input_file, output_file=None):
     # Combine features
     X_basic = df[basic_features].copy()
     X_combined = pd.concat([X_basic, tfidf_df], axis=1)
+
+    X_combined = X_combined.reindex(columns=feature_columns_full, fill_value=0)
     
     # Scale features
     print("Scaling features...")
