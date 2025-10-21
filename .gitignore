@@ -5,6 +5,7 @@ data/*.xls
 data/*.json
 data/raw/
 data/processed/
+data/
 
 # Model files (can be large and regenerated)
 models/*.pkl
