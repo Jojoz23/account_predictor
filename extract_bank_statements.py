@@ -105,6 +105,12 @@ class BankStatementExtractor:
         """
         print("📋 Trying table extraction strategy...")
         
+        # Detect bank first to extract year for proper date conversion
+        if not self.metadata.get('bank'):
+            with pdfplumber.open(self.pdf_path) as pdf_temp:
+                sample_text = pdf_temp.pages[0].extract_text() if pdf_temp.pages else ""
+            self._detect_bank(sample_text)
+        
         all_transactions = []
         
         with pdfplumber.open(self.pdf_path) as pdf:
@@ -319,10 +325,15 @@ class BankStatementExtractor:
         
         # Extract statement year from text (common formats)
         # Look for patterns like "Jan 1 to Jan 31, 2021", "For Jan 1 to Jan 31, 2021", "2021-01-01", etc.
+        # NOTE: For cross-year statements, we prefer the ENDING year (e.g., Dec 2017 - Jan 2018 → use 2018)
         year_patterns = [
+            r'ending\s+\w+\s+\d+,\s*(\d{4})',  # "ending July 31, 2024"
+            r'-\s*\w+\s*\d+/(\d{2})',  # "DEC29/17 - JAN 31/18" -> extract ending year 18
+            r'to\s*\w+\s*\d+,\s*(\d{4})',  # "to January 30, 2024" or "toJanuary30,2024"
+            r'\w+\s*\d+,\s*(\d{4})\s*to',  # "December 29, 2023 to" or "December29,2023to"
             r'for\s+\w+\s+\d+\s+to\s+\w+\s+\d+,\s+(\d{4})',  # "For Jan 1 to Jan 31, 2021"
+            r'/(\d{2})\s*-\s*\w+\s+\d+/\d{2}',  # "OCT 31/22 - NOV 30/22" -> extract 22
             r'(\d{4})-\d{2}-\d{2}',  # "2021-01-01"
-            r'to\s+\w+\s+\d+,\s+(\d{4})',  # "to Jan 31, 2021"
             r'statement period.*?(\d{4})',  # "Statement period ... 2021"
             r'as of.*?(\d{4})',  # "as of ... 2021"
         ]
@@ -330,7 +341,11 @@ class BankStatementExtractor:
         for pattern in year_patterns:
             match = re.search(pattern, text_lower)
             if match:
-                self.metadata['statement_year'] = match.group(1)
+                year = match.group(1)
+                # Handle 2-digit years (22 -> 2022)
+                if len(year) == 2:
+                    year = '20' + year
+                self.metadata['statement_year'] = year
                 break
         
         if self.metadata['bank']:
@@ -750,6 +765,8 @@ class BankStatementExtractor:
             df['Description'] = df['Description'].astype(str).str.strip()
             # Remove "balance forward" text from descriptions but keep the transaction
             df['Description'] = df['Description'].str.replace(r'\bbalance forward\b', '', case=False, regex=True)
+            # Remove "Account Fees: $X.XX" suffix from descriptions (RBC specific)
+            df['Description'] = df['Description'].str.replace(r'\s*Account Fees:\s*\$[\d,]+\.\d{2}$', '', case=False, regex=True)
             df['Description'] = df['Description'].str.strip()  # Clean up extra spaces
             df = df[df['Description'] != '']
             df = df[df['Description'] != 'None']
@@ -858,11 +875,20 @@ class BankStatementExtractor:
             date_str = str(date_str).strip()
             
             # Try common formats
-            # Format 1: Jan 15, 2024
-            if re.match(r'[A-Z][a-z]{2}\s+\d{1,2}', date_str):
-                # Add current year if not present
+            # Format 1: Jan 15, 2024 or Nov 07 or NOV01 (TD format - uppercase no space)
+            if re.match(r'[A-Z][a-z]{2}\s+\d{1,2}', date_str) or re.match(r'[A-Z]{3}\d{1,2}', date_str):
+                # For TD format (NOV01), add space between month and day
+                if re.match(r'[A-Z]{3}\d{1,2}', date_str):
+                    # Split into month and day: "NOV01" -> "NOV 01"
+                    month = date_str[:3]
+                    day = date_str[3:]
+                    date_str = f"{month} {day}"
+                
+                # Add year if not present
                 if not re.search(r'\d{4}', date_str):
-                    date_str = f"{date_str} {datetime.now().year}"
+                    # Use statement year from metadata if available, otherwise current year
+                    year = self.metadata.get('statement_year', datetime.now().year)
+                    date_str = f"{date_str} {year}"
                 return date_parser.parse(date_str)
             
             # Format 2: 01/15/2024 or 2024/01/15
