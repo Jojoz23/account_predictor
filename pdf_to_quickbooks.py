@@ -235,13 +235,14 @@ class PDFToQuickBooks:
         
         return df
     
-    def process_folder(self, folder_path, output_folder=None):
+    def process_folder(self, folder_path, output_folder=None, is_credit_card=None):
         """
         Process all PDFs in a folder
         
         Parameters:
         - folder_path: Path to folder with PDF bank statements
         - output_folder: Path for output files (default: same as input)
+        - is_credit_card: True/False/None (None = auto-detect per file)
         
         Returns:
         - Combined DataFrame with all predictions
@@ -261,10 +262,31 @@ class PDFToQuickBooks:
         for i, pdf_file in enumerate(pdf_files, 1):
             print(f"\n[{i}/{len(pdf_files)}] {pdf_file.name}")
             try:
-                df = self.process_pdf(str(pdf_file))
-                if df is not None:
-                    df['Source_File'] = pdf_file.name
-                    all_results.append(df)
+                # Extract and predict, but don't save individual files
+                print(f"🔍 Extracting transactions from: {pdf_file.name}")
+                print("="*70)
+                
+                # Step 1: Extract transactions from PDF
+                from extract_bank_statements import extract_from_pdf
+                df_extracted = extract_from_pdf(str(pdf_file), save_excel=False)
+                
+                if df_extracted is None or len(df_extracted) == 0:
+                    print("❌ Failed to extract transactions")
+                    continue
+                
+                # Step 2: Convert to standard format
+                df_converted, was_credit_card = self._convert_to_standard_format(df_extracted, is_credit_card=is_credit_card)
+                
+                # Step 3: Predict account categories
+                print("\n🧠 Predicting account categories...")
+                df_predicted = self.predict_accounts(df_converted)
+                
+                # Add source file tracking
+                df_predicted['Source_File'] = pdf_file.name
+                all_results.append(df_predicted)
+                
+                print(f"✅ Processed {len(df_predicted)} transactions from {pdf_file.name}\n")
+                
             except Exception as e:
                 print(f"❌ Error processing {pdf_file.name}: {e}")
                 continue
@@ -286,7 +308,8 @@ class PDFToQuickBooks:
         combined_excel = output_folder / "all_transactions_categorized.xlsx"
         combined_qb = output_folder / "all_transactions_quickbooks.iif"
         
-        self.save_to_excel(combined_df, combined_excel)
+        # For combined file, use bank format (separate Debit/Deposit) since mixing is complex
+        self.save_to_excel(combined_df, combined_excel, is_credit_card=False)
         self.save_to_quickbooks_iif(combined_df, combined_qb)
         
         print("\n" + "="*70)
@@ -519,7 +542,8 @@ class PDFToQuickBooks:
             account_summary = account_summary.sort_values('Count', ascending=False)
             account_summary.to_excel(writer, sheet_name='By Account')
         
-        print(f"✅ Excel saved: {output_path}")
+        if not hasattr(output_path, 'write'):
+            print(f"✅ Excel saved: {output_path}")
     
     def save_to_quickbooks_iif(self, df, output_path):
         """
@@ -548,12 +572,16 @@ class PDFToQuickBooks:
             iif_content.append(f"SPL\t{idx}\tDEPOSIT\t{date_str}\t{account}\t\t\t{-amount}\t\t{description}")
             iif_content.append("ENDTRNS")
         
-        # Save to file
-        with open(output_path, 'w', encoding='utf-8') as f:
-            f.write('\n'.join(iif_content))
-        
-        print(f"✅ QuickBooks IIF saved: {output_path}")
-        print(f"   Import this file into QuickBooks Desktop")
+        # Save to file or StringIO
+        if hasattr(output_path, 'write'):
+            # StringIO object
+            output_path.write('\n'.join(iif_content))
+        else:
+            # File path
+            with open(output_path, 'w', encoding='utf-8') as f:
+                f.write('\n'.join(iif_content))
+            print(f"✅ QuickBooks IIF saved: {output_path}")
+            print(f"   Import this file into QuickBooks Desktop")
 
 
 def main():
@@ -604,23 +632,8 @@ def main():
         # Single PDF file
         pipeline.process_pdf(input_path, is_credit_card=is_credit_card)
     elif os.path.isdir(input_path):
-        # Folder of PDFs - process each with the same setting
-        folder = Path(input_path)
-        pdf_files = list(folder.glob('*.pdf'))
-        
-        if not pdf_files:
-            print(f"❌ No PDF files found in {input_path}")
-            return
-        
-        print(f"\n📁 Processing {len(pdf_files)} PDF files...")
-        
-        for i, pdf_file in enumerate(pdf_files, 1):
-            print(f"\n[{i}/{len(pdf_files)}] {pdf_file.name}")
-            try:
-                pipeline.process_pdf(str(pdf_file), is_credit_card=is_credit_card)
-            except Exception as e:
-                print(f"❌ Error processing {pdf_file.name}: {e}")
-                continue
+        # Folder of PDFs - use process_folder to create combined file
+        pipeline.process_folder(input_path, is_credit_card=is_credit_card)
     else:
         print(f"❌ Path not found: {input_path}")
 

@@ -7,7 +7,8 @@ data/raw/
 data/processed/
 data/
 
-# Model files (can be large and regenerated)
+# Model files - INCLUDE the active model, exclude old/unused ones
+!models/neural_network_account_predictor.pkl
 models/*.pkl
 models/*.joblib
 models/*.h5
@@ -50,8 +51,7 @@ logs/
 
 # Temporary files
 *.tmp
-*.temp
-temp/
+*.temptemp/
 
 # Environment variables (if you add any)
 .env
@@ -61,3 +61,4 @@ temp/
 *.zip
 *.tar.gz
 *.rar
+
