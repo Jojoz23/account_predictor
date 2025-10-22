@@ -8,11 +8,11 @@ data/processed/
 data/
 
 # Model files - INCLUDE the active model, exclude old/unused ones
-!models/neural_network_account_predictor.pkl
 models/*.pkl
 models/*.joblib
 models/*.h5
 models/*.model
+!models/neural_network_account_predictor.pkl
 
 # Results and outputs
 results/*.png
