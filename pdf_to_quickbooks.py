@@ -208,30 +208,29 @@ class PDFToQuickBooks:
         print("\n🧠 STEP 2: Predicting account categories...")
         df = self.predict_accounts(df)
         
-        # Step 3: Export results
-        print("\n💾 STEP 3: Exporting results...")
-        
-        # Generate output filenames if not provided
-        pdf_name = Path(pdf_path).stem
-        
-        if output_excel is None:
-            output_excel = f"data/categorized_{pdf_name}.xlsx"
-        
-        if output_quickbooks is None:
-            output_quickbooks = f"data/quickbooks_{pdf_name}.iif"
-        
-        # Save to Excel (with original credit card format if applicable)
-        self.save_to_excel(df, output_excel, is_credit_card=was_credit_card)
-        
-        # Save to QuickBooks format
-        self.save_to_quickbooks_iif(df, output_quickbooks)
-        
-        print("\n" + "="*70)
-        print("✅ PIPELINE COMPLETE!")
-        print(f"📊 Processed {len(df)} transactions")
-        print(f"💾 Excel file: {output_excel}")
-        print(f"💾 QuickBooks file: {output_quickbooks}")
-        print("="*70)
+        # Step 3: Export results (only if output paths provided)
+        if output_excel or output_quickbooks:
+            print("\n💾 STEP 3: Exporting results...")
+            
+            # Generate output filenames if not fully specified
+            pdf_name = Path(pdf_path).stem
+            
+            if output_excel:
+                # Save to Excel (with original credit card format if applicable)
+                self.save_to_excel(df, output_excel, is_credit_card=was_credit_card)
+            
+            if output_quickbooks:
+                # Save to QuickBooks format
+                self.save_to_quickbooks_iif(df, output_quickbooks)
+            
+            print("\n" + "="*70)
+            print("✅ PIPELINE COMPLETE!")
+            print(f"📊 Processed {len(df)} transactions")
+            if output_excel:
+                print(f"💾 Excel file: {output_excel}")
+            if output_quickbooks:
+                print(f"💾 QuickBooks file: {output_quickbooks}")
+            print("="*70)
         
         return df
     
