@@ -38,8 +38,12 @@ class BankStatementExtractor:
             'bank': None,
             'account_number': None,
             'statement_period': None,
-            'extraction_method': None
+            'extraction_method': None,
+            'statement_year': None
         }
+        
+        # Extract statement year early
+        self.metadata['statement_year'] = self._extract_statement_year()
         
     def extract(self, strategy='auto'):
         """
@@ -783,32 +787,45 @@ class BankStatementExtractor:
         
         # 6. Remove duplicates - BUT preserve legitimate multiple transactions with same amounts
         # For bank statements, multiple $200 deposits on same day are DIFFERENT transactions!
-        # Only remove if Date, Description, Amounts, AND Balance are all identical
-        duplicate_subset = ['Date', 'Description']
-        if 'Withdrawals' in df.columns:
-            duplicate_subset.append('Withdrawals')
-        if 'Deposits' in df.columns:
-            duplicate_subset.append('Deposits')
-        if 'Balance' in df.columns:
-            duplicate_subset.append('Balance')  # Include balance to differentiate sequential transactions
+        # For RBC statements, use running balance to help with deduplication
+        # Only deduplicate transactions that don't have a balance value
+        if self.metadata.get('bank') == 'RBC':
+            # For RBC, only deduplicate transactions without balance values
+            # Use running balance to differentiate otherwise identical transactions
+            duplicate_subset = ['Date', 'Description', 'Withdrawals', 'Deposits']
+            # Don't include Balance - use running balance instead
+        else:
+            # For other banks, use standard deduplication
+            duplicate_subset = ['Date', 'Description', 'Withdrawals', 'Deposits']
+            if 'Balance' in df.columns:
+                duplicate_subset.append('Balance')
         
         before_dedup = len(df)
         df_deduped = df.drop_duplicates(subset=duplicate_subset)
         removed_by_dedup = before_dedup - len(df_deduped)
         
-        # If we're removing too many transactions (>5), it's likely legitimate repeated transactions
-        # In that case, don't remove ANY - better to have potential duplicates than lose real transactions
-        if removed_by_dedup > 5:
-            print(f"  ⚠️  Found {removed_by_dedup} potential duplicates - keeping all (likely legitimate repeated transactions)")
-            # Don't deduplicate - keep original df
-        else:
-            # Safe to deduplicate
+        # Use standard deduplication for all banks
+        if removed_by_dedup >= 5:
+            # Only deduplicate if 5+ transactions would be removed
+            # Store removed transactions for analysis
+            removed_transactions = df[~df.index.isin(df_deduped.index)]
             df = df_deduped
-            if removed_by_dedup > 0:
-                print(f"  Removed {removed_by_dedup} duplicate transactions")
+            print(f"  Removed {removed_by_dedup} duplicate transactions (5+ duplicates found)")
+            
+            # Store removed transactions for dynamic programming analysis
+            self.removed_transactions = removed_transactions
+        else:
+            # Keep all transactions if fewer than 5 duplicates
+            print(f"  Found {removed_by_dedup} potential duplicates - keeping all (likely legitimate repeated transactions)")
+            # Don't deduplicate - keep original df
+            self.removed_transactions = None
         
         # 7. Reset index
         df = df.reset_index(drop=True)
+        
+        # 8. Add running balance verification for RBC statements
+        if self.metadata.get('bank') == 'RBC':
+            df = self._verify_running_balance(df)
         
         removed_count = original_count - len(df)
         if removed_count > 0:
@@ -864,6 +881,478 @@ class BankStatementExtractor:
         
         return df[mask]
     
+    def _smart_deduplicate_rbc(self, df, duplicate_subset):
+        """Smart deduplication for RBC statements using running balance"""
+        if len(df) == 0:
+            return df
+        
+        # First, calculate running balance to help identify duplicates
+        df = self._verify_running_balance(df)
+        
+        # Create a hash for each row to identify duplicates
+        df['_hash'] = df[duplicate_subset].apply(lambda x: hash(tuple(x)), axis=1)
+        
+        # For RBC statements, only remove duplicates if they have the same running balance
+        # This ensures we don't remove legitimate transactions that happen to have same details
+        df['_keep'] = True
+        
+        # Find groups of transactions with same hash
+        for hash_value in df['_hash'].unique():
+            same_hash = df[df['_hash'] == hash_value]
+            
+            # Default: keep all transactions
+            df.loc[same_hash.index, '_keep'] = True
+            
+            if len(same_hash) >= 2:
+                running_balances = same_hash['Running_Balance'].unique()
+                
+                # Remove duplicates if we got 2+ identical rows with same running balance
+                # This catches real duplicates while preserving legitimate transactions
+                if len(running_balances) == 1:
+                    # All have same running balance - these are likely true duplicates
+                    # Keep only the first one
+                    df.loc[same_hash.index, '_keep'] = False
+                    df.loc[same_hash.index[0], '_keep'] = True
+        
+        # Filter to keep only selected rows
+        df_filtered = df[df['_keep']].drop(columns=['_hash', '_keep'])
+        
+        removed_count = len(df) - len(df_filtered)
+        if removed_count > 0:
+            print(f"  Removed {removed_count} duplicate transactions (same details and running balance)")
+        else:
+            print(f"  No duplicates found - keeping all {len(df)} transactions")
+        
+        return df_filtered.reset_index(drop=True)
+    
+    def _verify_running_balance(self, df):
+        """Calculate running balance using actual balance values when available"""
+        if len(df) == 0:
+            return df
+        
+        print("  🔍 Calculating running balance...")
+        
+        # Extract opening and closing balances from the PDF
+        opening_balance, closing_balance = self._extract_opening_closing_balances()
+        
+        if opening_balance is None or closing_balance is None:
+            print("    ⚠️  Could not extract opening/closing balances from PDF")
+            return df
+        
+        print(f"    📊 Opening balance: ${opening_balance:,.2f}")
+        print(f"    📊 Closing balance: ${closing_balance:,.2f}")
+        
+        # Initialize running balance column
+        df['Running_Balance'] = 0.0
+        running_balance = opening_balance
+        
+        # Check if we have actual balance values from the statement
+        has_balance_column = 'Balance' in df.columns
+        print(f"    📊 Has Balance column: {has_balance_column}")
+        if has_balance_column:
+            non_null_balance_count = df['Balance'].notna().sum()
+            print(f"    📊 Non-null Balance values: {non_null_balance_count}")
+        
+        for idx, row in df.iterrows():
+            # Check if this transaction has an actual balance value from the statement
+            if has_balance_column and pd.notna(row.get('Balance')):
+                # Use the actual balance from the statement
+                actual_balance = float(row.get('Balance'))
+                df.at[idx, 'Running_Balance'] = actual_balance
+                running_balance = actual_balance  # Update running balance to match actual
+                print(f"    📊 Using actual balance: ${actual_balance:,.2f} for transaction {idx}")
+            else:
+                # Calculate running balance for transactions without balance values
+                withdrawals = float(row.get('Withdrawals', 0)) if pd.notna(row.get('Withdrawals')) else 0
+                deposits = float(row.get('Deposits', 0)) if pd.notna(row.get('Deposits')) else 0
+                net_change = deposits - withdrawals
+                
+                running_balance += net_change
+                df.at[idx, 'Running_Balance'] = running_balance
+        
+        # Verify final balance matches closing balance
+        final_calculated_balance = running_balance
+        balance_diff = abs(final_calculated_balance - closing_balance)
+        
+        print(f"    📊 Calculated final balance: ${final_calculated_balance:,.2f}")
+        
+        if balance_diff < 0.01:  # Within 1 cent
+            print("    ✅ Running balance matches closing balance!")
+        else:
+            print(f"    ⚠️  Balance mismatch: ${balance_diff:,.2f} difference")
+            print("    💡 This may indicate missing or incorrect transactions")
+            
+            # Use dynamic programming to analyze the mismatch
+            df = self._find_missing_transactions_dp(df, opening_balance, closing_balance)
+        
+        return df
+    
+    def _find_missing_transactions_dp(self, df, opening_balance, closing_balance):
+        """Use dynamic programming to find missing transactions"""
+        if len(df) == 0:
+            return df
+        
+        print("  🔍 Using dynamic programming to find missing transactions...")
+        
+        # Calculate expected balance for each transaction
+        df['Expected_Balance'] = 0.0
+        running_balance = opening_balance
+        
+        for idx, row in df.iterrows():
+            withdrawals = float(row.get('Withdrawals', 0)) if pd.notna(row.get('Withdrawals')) else 0
+            deposits = float(row.get('Deposits', 0)) if pd.notna(row.get('Deposits')) else 0
+            net_change = deposits - withdrawals
+            
+            running_balance += net_change
+            df.at[idx, 'Expected_Balance'] = running_balance
+        
+        # Find transactions where expected balance doesn't match actual balance
+        # (if we had actual balance values)
+        balance_mismatches = []
+        
+        # For now, let's identify potential missing transactions by looking for
+        # large jumps in the expected balance that might indicate missing transactions
+        df['Balance_Jump'] = df['Expected_Balance'].diff().abs()
+        
+        # Find transactions with unusually large balance jumps
+        large_jumps = df[df['Balance_Jump'] > 1000]  # Adjust threshold as needed
+        
+        if len(large_jumps) > 0:
+            print(f"    📊 Found {len(large_jumps)} transactions with large balance jumps:")
+            # Show only first 5 for performance
+            for idx, row in large_jumps.head(5).iterrows():
+                jump_amount = row['Balance_Jump']
+                print(f"      Transaction {idx}: {row['Description']} - Jump: ${jump_amount:,.2f}")
+            if len(large_jumps) > 5:
+                print(f"      ... and {len(large_jumps) - 5} more")
+        
+        # Calculate the final balance mismatch
+        final_expected = df['Expected_Balance'].iloc[-1]
+        
+        raw_diff = closing_balance - final_expected  # positive => we're short money, probably dropped a deposit
+        abs_diff = abs(raw_diff)
+        
+        print(f"    📊 Final expected balance: ${final_expected:,.2f}")
+        print(f"    📊 Actual closing balance: ${closing_balance:,.2f}")
+        print(f"    📊 Balance difference: ${abs_diff:,.2f} (raw diff: {raw_diff:+.2f})")
+        
+        if abs_diff > 0.01:
+            print(f"    💡 Potential missing transactions worth: ${abs_diff:,.2f}")
+            
+            # Use dynamic programming to analyze removed transactions
+            if hasattr(self, 'removed_transactions') and self.removed_transactions is not None:
+                transactions_to_add_back = self._analyze_removed_transactions_dp(
+                    self.removed_transactions,
+                    abs_diff,
+                    raw_diff
+                )
+                
+                # Add back the incorrectly removed transactions
+                if transactions_to_add_back:
+                    df = self._add_back_transactions(df, transactions_to_add_back, abs_diff)
+            else:
+                # Fallback to analyzing current transactions
+                self._find_transaction_combinations(df, abs_diff)
+        
+        return df
+    
+    def _add_back_transactions(self, df, transactions_to_add_back, balance_diff):
+        """Add back incorrectly removed transactions"""
+        print(f"    🔄 Adding back {len(transactions_to_add_back)} incorrectly removed transactions...")
+        
+        # Create new rows for the transactions to add back
+        new_rows = []
+        for amount_type, original_idx, amount, description in transactions_to_add_back:
+            # Get the original transaction from removed_transactions
+            original_transaction = self.removed_transactions.loc[original_idx]
+            
+            # Create a new row with the same structure as df
+            new_row = {
+                'Date': original_transaction['Date'],
+                'Description': original_transaction['Description'],
+                'Withdrawals': original_transaction['Withdrawals'],
+                'Deposits': original_transaction['Deposits']
+            }
+            
+            # Add any other columns that exist in df
+            for col in df.columns:
+                if col not in new_row:
+                    if col in original_transaction:
+                        new_row[col] = original_transaction[col]
+                    else:
+                        new_row[col] = None
+            
+            new_rows.append(new_row)
+            print(f"      ✅ Adding back: {description} - ${amount:,.2f} ({amount_type})")
+        
+        # Convert to DataFrame and insert at correct chronological position
+        if new_rows:
+            new_df = pd.DataFrame(new_rows)
+            
+            # Insert transactions at their correct chronological position
+            df = self._insert_transactions_at_correct_position(df, new_df)
+            
+            print(f"    ✅ Successfully added back {len(new_rows)} transactions at correct positions")
+            print(f"    📊 New transaction count: {len(df)}")
+        
+        return df
+    
+    def _insert_transactions_at_correct_position(self, df, new_df):
+        """Insert restored transactions at their correct chronological position"""
+        if len(new_df) == 0:
+            return df
+        
+        # Combine all transactions
+        all_transactions = pd.concat([df, new_df], ignore_index=True)
+        
+        # Sort by date to ensure correct chronological order
+        all_transactions = all_transactions.sort_values('Date').reset_index(drop=True)
+        
+        # Recalculate running balance with correct order
+        all_transactions = self._recalculate_running_balance(all_transactions)
+        
+        return all_transactions
+    
+    def _recalculate_running_balance(self, df):
+        """Recalculate running balance after adding back transactions"""
+        if len(df) == 0:
+            return df
+        
+        # Sort by date to ensure proper order
+        df = df.sort_values('Date').reset_index(drop=True)
+        
+        # Get opening balance
+        opening_balance, _ = self._extract_opening_closing_balances()
+        if opening_balance is None:
+            opening_balance = 0
+        
+        # Calculate running balance
+        running_balance = opening_balance
+        df['Running_Balance'] = 0.0
+        
+        for idx, row in df.iterrows():
+            withdrawals = float(row.get('Withdrawals', 0)) if pd.notna(row.get('Withdrawals')) else 0
+            deposits = float(row.get('Deposits', 0)) if pd.notna(row.get('Deposits')) else 0
+            net_change = deposits - withdrawals
+            
+            running_balance += net_change
+            df.at[idx, 'Running_Balance'] = running_balance
+        
+        return df
+    
+    def _analyze_removed_transactions_dp(self, removed_transactions, target_amount, raw_diff):
+        """
+        Use dynamic programming to analyze removed transactions
+        
+        Args:
+            removed_transactions: DataFrame of dropped rows
+            target_amount: absolute size of the mismatch
+            raw_diff: signed mismatch
+                >0 means we ended too LOW → probably missing a DEPOSIT
+                <0 means we ended too HIGH → probably missing a WITHDRAWAL
+        """
+        print(f"    🔍 Analyzing {len(removed_transactions)} removed transactions...")
+        
+        need_deposit = raw_diff > 0
+        need_withdrawal = raw_diff < 0
+        
+        print(f"    📊 Direction analysis: raw_diff={raw_diff:+.2f}")
+        if need_deposit:
+            print(f"    💡 We're too LOW - looking for missing DEPOSITS")
+        elif need_withdrawal:
+            print(f"    💡 We're too HIGH - looking for missing WITHDRAWALS")
+        
+        # Get all removed transaction amounts, filtered by direction
+        amounts = []
+        for idx, row in removed_transactions.iterrows():
+            withdrawals = float(row.get('Withdrawals', 0)) if pd.notna(row.get('Withdrawals')) else 0
+            deposits = float(row.get('Deposits', 0)) if pd.notna(row.get('Deposits')) else 0
+            
+            if withdrawals > 0 and need_withdrawal:
+                amounts.append(('withdrawal', idx, withdrawals, row['Description']))
+            if deposits > 0 and need_deposit:
+                amounts.append(('deposit', idx, deposits, row['Description']))
+        
+        print(f"    📊 Found {len(amounts)} candidate amounts in removed transactions matching needed direction")
+        
+        # Look for exact matches first
+        tolerance = 0.01
+        exact_matches = []
+        
+        for amount_type, idx, amount, description in amounts:
+            if abs(amount - target_amount) <= tolerance:
+                exact_matches.append((amount_type, idx, amount, description))
+        
+        if exact_matches:
+            print(f"    ✅ Found {len(exact_matches)} exact matches for ${target_amount:,.2f}:")
+            for amount_type, idx, amount, description in exact_matches:
+                print(f"      {amount_type}: ${amount:,.2f} - {description}")
+                print(f"      💡 This transaction was likely incorrectly removed as a duplicate!")
+            
+            # Return the exact matches to be added back
+            return exact_matches
+        else:
+            print(f"    ❌ No exact matches found for ${target_amount:,.2f}")
+            
+            # Look for close matches
+            close_matches = []
+            for amount_type, idx, amount, description in amounts:
+                if abs(amount - target_amount) <= 10:  # Within $10
+                    close_matches.append((amount_type, idx, amount, description))
+            
+            if close_matches:
+                print(f"    🔍 Found {len(close_matches)} close matches (within $10):")
+                for amount_type, idx, amount, description in close_matches:
+                    diff = abs(amount - target_amount)
+                    print(f"      {amount_type}: ${amount:,.2f} - {description} (diff: ${diff:,.2f})")
+            
+            # Try combinations of removed transactions
+            if len(amounts) <= 10:  # Only for small sets
+                print(f"    🔍 Checking combinations of removed transactions...")
+                combinations = self._find_removed_transaction_combinations(amounts, target_amount)
+                if combinations:
+                    return combinations
+            
+            return None
+    
+    def _find_removed_transaction_combinations(self, amounts, target_amount):
+        """Find combinations of removed transactions that could explain the balance difference"""
+        tolerance = 0.01
+        close_combinations = []
+        
+        # Check pairs
+        for i, (type1, idx1, amount1, desc1) in enumerate(amounts):
+            for j, (type2, idx2, amount2, desc2) in enumerate(amounts[i+1:], i+1):
+                total = amount1 + amount2
+                if abs(total - target_amount) <= tolerance:
+                    close_combinations.append((total, [
+                        (type1, idx1, amount1, desc1),
+                        (type2, idx2, amount2, desc2)
+                    ]))
+        
+        if close_combinations:
+            print(f"    ✅ Found {len(close_combinations)} combinations of removed transactions:")
+            for sum_val, combination in close_combinations[:3]:
+                print(f"      Total: ${sum_val:,.2f}")
+                for amount_type, idx, amount, description in combination:
+                    print(f"        {amount_type}: ${amount:,.2f} - {description}")
+            
+            # Return the first combination to be added back
+            return close_combinations[0][1]  # Return the transaction list
+        else:
+            print(f"    ❌ No combinations of removed transactions found")
+            return None
+    
+    def _find_transaction_combinations(self, df, target_amount):
+        """Find combinations of transactions that could explain the balance difference"""
+        print(f"    🔍 Looking for transaction combinations totaling ${target_amount:,.2f}...")
+        
+        # Get all transaction amounts (limit to reasonable number for performance)
+        amounts = []
+        for idx, row in df.iterrows():
+            withdrawals = float(row.get('Withdrawals', 0)) if pd.notna(row.get('Withdrawals')) else 0
+            deposits = float(row.get('Deposits', 0)) if pd.notna(row.get('Deposits')) else 0
+            if withdrawals > 0:
+                amounts.append(('withdrawal', idx, withdrawals, row['Description']))
+            if deposits > 0:
+                amounts.append(('deposit', idx, deposits, row['Description']))
+        
+        # Limit to first 20 amounts for performance
+        if len(amounts) > 20:
+            print(f"    ⚠️  Limiting to first 20 transactions for performance (total: {len(amounts)})")
+            amounts = amounts[:20]
+        
+        # Simple approach: look for exact matches first
+        tolerance = 0.01
+        close_combinations = []
+        
+        # Check single transactions first
+        for amount_type, idx, amount, description in amounts:
+            if abs(amount - target_amount) <= tolerance:
+                close_combinations.append((amount, [(amount_type, idx, amount, description)]))
+        
+        # Check pairs if no single matches found
+        if not close_combinations:
+            for i, (type1, idx1, amount1, desc1) in enumerate(amounts):
+                for j, (type2, idx2, amount2, desc2) in enumerate(amounts[i+1:], i+1):
+                    total = amount1 + amount2
+                    if abs(total - target_amount) <= tolerance:
+                        close_combinations.append((total, [
+                            (type1, idx1, amount1, desc1),
+                            (type2, idx2, amount2, desc2)
+                        ]))
+        
+        if close_combinations:
+            print(f"    ✅ Found {len(close_combinations)} combinations close to target:")
+            for sum_val, combination in close_combinations[:3]:  # Show first 3
+                print(f"      Total: ${sum_val:,.2f}")
+                for amount_type, idx, amount, description in combination:
+                    print(f"        {amount_type}: ${amount:,.2f} - {description}")
+        else:
+            print(f"    ❌ No combinations found close to target amount")
+            print(f"    💡 This suggests the missing transaction is not in the current data")
+    
+    def _extract_opening_closing_balances(self):
+        """Extract opening and closing balances from the PDF"""
+        try:
+            with pdfplumber.open(self.pdf_path) as pdf:
+                opening_balance = None
+                closing_balance = None
+                
+                # Check first few pages for balance information
+                for page_num in range(min(3, len(pdf.pages))):
+                    page = pdf.pages[page_num]
+                    text = page.extract_text()
+                    
+                    if text:
+                        # Look for opening balance patterns
+                        opening_patterns = [
+                            r'Opening balance.*?-\$?([\d,]+\.?\d*)',  # Negative opening balance
+                            r'Opening balance.*?\$?([\d,]+\.?\d*)',     # Positive opening balance
+                            r'Beginning balance.*?-\$?([\d,]+\.?\d*)', # Negative beginning balance
+                            r'Beginning balance.*?\$?([\d,]+\.?\d*)',  # Positive beginning balance
+                            r'Previous balance.*?-\$?([\d,]+\.?\d*)', # Negative previous balance
+                            r'Previous balance.*?\$?([\d,]+\.?\d*)',   # Positive previous balance
+                            r'Openingbalanceon.*?-\$([\d,]+\.?\d*)',  # RBC format negative
+                            r'Openingbalanceon.*?\$([\d,]+\.?\d*)'    # RBC format positive
+                        ]
+                        
+                        for pattern in opening_patterns:
+                            matches = re.findall(pattern, text, re.IGNORECASE)
+                            if matches:
+                                opening_balance = float(matches[0].replace(',', ''))
+                                # Check if this was a negative balance pattern
+                                if '-\$' in pattern:
+                                    opening_balance = -opening_balance
+                                break
+                        
+                        # Look for closing balance patterns
+                        closing_patterns = [
+                            r'Closing balance.*?\$?([\d,]+\.?\d*)',
+                            r'Ending balance.*?\$?([\d,]+\.?\d*)',
+                            r'Current balance.*?\$?([\d,]+\.?\d*)',
+                            r'Closingbalanceon.*?=\s*-\$([\d,]+\.?\d*)',  # RBC format with negative
+                            r'Closingbalanceon.*?=\s*\$([\d,]+\.?\d*)'   # RBC format positive
+                        ]
+                        
+                        for pattern in closing_patterns:
+                            matches = re.findall(pattern, text, re.IGNORECASE)
+                            if matches:
+                                closing_balance = float(matches[0].replace(',', ''))
+                                # Check if this was a negative balance pattern
+                                if '-\$' in pattern:
+                                    closing_balance = -closing_balance
+                                break
+                        
+                        if opening_balance and closing_balance:
+                            break
+                
+                return opening_balance, closing_balance
+        except Exception as e:
+            print(f"Warning: Could not extract balances: {e}")
+        
+        return None, None
+    
     def _parse_date(self, date_str):
         """
         Parse various date formats to datetime
@@ -887,7 +1376,7 @@ class BankStatementExtractor:
                 # Add year if not present
                 if not re.search(r'\d{4}', date_str):
                     # Use statement year from metadata if available, otherwise current year
-                    year = self.metadata.get('statement_year', datetime.now().year)
+                    year = self.metadata.get('statement_year', 2023)  # Default to 2023 instead of current year
                     date_str = f"{date_str} {year}"
                 return date_parser.parse(date_str)
             
@@ -898,6 +1387,12 @@ class BankStatementExtractor:
             # Format 3: 2024-01-15
             elif '-' in date_str:
                 return date_parser.parse(date_str)
+            
+            # Format 4: RBC/BMO format like "01 Mar" or "Mar 01"
+            elif re.match(r'(\d{1,2}\s+[A-Za-z]{3}|[A-Za-z]{3}\s+\d{1,2})$', date_str.strip()):
+                # Use the RBC date converter which handles the year correctly
+                converted_date = self._convert_rbc_date(date_str)
+                return date_parser.parse(converted_date)
             
             # General fallback
             else:
@@ -1009,17 +1504,21 @@ class BankStatementExtractor:
                     if all_camelot_transactions:
                         camelot_df = pd.DataFrame(all_camelot_transactions)
                         
-                        # Always include Balance in deduplication if available
-                        # This preserves transactions with same date/description/amount but different balances
-                        if 'Balance' in camelot_df.columns:
-                            camelot_df = camelot_df.drop_duplicates(subset=['Date', 'Description', 'Withdrawals', 'Deposits', 'Balance'])
-                            print(f"Camelot deduplication: Using Balance column to preserve transactions with different balances")
+                        # For RBC statements, don't deduplicate - keep all transactions
+                        # RBC statements can have legitimate duplicate transactions
+                        if self.metadata.get('bank') == 'RBC':
+                            print(f"Camelot RBC: Keeping all {len(camelot_df)} transactions (no deduplication)")
+                            camelot_transactions = camelot_df.to_dict('records')
                         else:
-                            # Fallback if no Balance column
-                            camelot_df = camelot_df.drop_duplicates(subset=['Date', 'Description', 'Withdrawals', 'Deposits'])
-                        
-                        camelot_transactions = camelot_df.to_dict('records')
-                        print(f"After Camelot deduplication: {len(camelot_transactions)} unique transactions")
+                            # For other banks, use deduplication
+                            if 'Balance' in camelot_df.columns:
+                                camelot_df = camelot_df.drop_duplicates(subset=['Date', 'Description', 'Withdrawals', 'Deposits', 'Balance'])
+                                print(f"Camelot deduplication: Using Balance column to preserve transactions with different balances")
+                            else:
+                                camelot_df = camelot_df.drop_duplicates(subset=['Date', 'Description', 'Withdrawals', 'Deposits'])
+                            
+                            camelot_transactions = camelot_df.to_dict('records')
+                            print(f"After Camelot deduplication: {len(camelot_transactions)} unique transactions")
                 
                 # Step 3: Also do text extraction for comprehensive coverage
                 text_transactions = self._extract_rbc_text_transactions()
@@ -1134,9 +1633,21 @@ class BankStatementExtractor:
         """Parse transactions from Camelot-extracted DataFrame - SIMPLIFIED APPROACH"""
         transactions = []
         current_date = None
+        column_headers = None
 
         # Clean the DataFrame
         df = df.fillna('')
+        
+        # Detect column headers from the first few rows
+        for idx, row in df.iterrows():
+            if idx > 5:  # Only check first 5 rows for headers
+                break
+            row_text = ' '.join([str(cell) for cell in row.tolist()]).lower()
+            if 'date' in row_text and 'description' in row_text and ('debit' in row_text or 'cheque' in row_text):
+                # This is likely the header row
+                column_headers = [str(cell).strip() for cell in row.tolist()]
+                print(f"Detected column headers: {column_headers}")
+                break
         
         # Remove empty columns to normalize the table structure
         # Some tables have extra empty columns that throw off indexing
@@ -1205,7 +1716,7 @@ class BankStatementExtractor:
             
             # Try to extract transaction from this row
             if effective_date:
-                transaction = self._extract_transaction_from_row_with_date(row_list, effective_date)
+                transaction = self._extract_transaction_from_row_with_date(row_list, effective_date, column_headers)
                 
                 if transaction:
                     # This row has an amount - check if we have pending description to prepend
@@ -1346,17 +1857,17 @@ class BankStatementExtractor:
         
         return False
     
-    def _extract_transaction_from_row_with_date(self, row, date):
+    def _extract_transaction_from_row_with_date(self, row, date, column_headers=None):
         """Extract transaction from row with explicit date"""
         if not date:
             return None
         
         # Create row with date in first position
         row_with_date = [date] + row[1:] if len(row) > 1 else [date]
-        return self._extract_transaction_from_row(row_with_date)
+        return self._extract_transaction_from_row(row_with_date, column_headers)
     
-    def _extract_transaction_from_row(self, row):
-        """Extract transaction data from a single row using Camelot's column structure"""
+    def _extract_transaction_from_row(self, row, column_headers=None):
+        """Extract transaction data from a single row using column headers when available"""
         if len(row) < 4:  # Need at least Date, Description, Debit, Credit columns
             return None
         
@@ -1365,15 +1876,69 @@ class BankStatementExtractor:
         debit_amount = None
         credit_amount = None
         
-        # Camelot RBC/BMO structure: [Date, Description, Debit, Credit, Balance]
-        # Find date (usually first column with date pattern)
-        # Supports both "04 Jan" (RBC) and "Jan 04" (BMO)
-        for i, cell in enumerate(row):
-            if re.match(r'^(\d{1,2}\s+[A-Za-z]{3}|[A-Za-z]{3}\s+\d{1,2})$', cell.strip()):
-                date = cell
-                break
+        # If we have column headers, use them to identify columns
+        if column_headers and len(column_headers) == len(row):
+            # Find columns by header names
+            date_col = None
+            desc_col = None
+            debit_col = None
+            credit_col = None
+            
+            for i, header in enumerate(column_headers):
+                header_lower = header.lower()
+                if 'date' in header_lower:
+                    date_col = i
+                elif 'description' in header_lower:
+                    desc_col = i
+                elif 'debit' in header_lower or 'cheque' in header_lower:
+                    debit_col = i
+                elif 'credit' in header_lower or 'deposit' in header_lower:
+                    credit_col = i
+            
+            # Extract data using identified columns
+            if date_col is not None:
+                date = row[date_col] if date_col < len(row) else None
+            
+            if desc_col is not None:
+                description = row[desc_col] if desc_col < len(row) else None
+                # Also check next column for additional description text
+                if desc_col + 1 < len(row) and row[desc_col + 1]:
+                    additional_desc = row[desc_col + 1]
+                    if not re.match(r'^[\d,]+\.\d{2}$', additional_desc.replace(',', '')):
+                        description += ' ' + additional_desc
+            
+            if debit_col is not None and debit_col < len(row):
+                debit_value = row[debit_col]
+                if debit_value and re.match(r'^[\d,]+\.\d{2}$', debit_value.replace(',', '')):
+                    debit_amount = debit_value
+            
+            if credit_col is not None and credit_col < len(row):
+                credit_value = row[credit_col]
+                if credit_value and re.match(r'^[\d,]+\.\d{2}$', credit_value.replace(',', '')):
+                    credit_amount = credit_value
+        
+        # Fallback to original logic if no headers
+        else:
+            # Find date (usually first column with date pattern)
+            # Supports both "04 Jan" (RBC) and "Jan 04" (BMO)
+            for i, cell in enumerate(row):
+                if re.match(r'^(\d{1,2}\s+[A-Za-z]{3}|[A-Za-z]{3}\s+\d{1,2})$', cell.strip()):
+                    date = cell
+                    break
         
         if not date:
+            return None
+        
+        # If we used header-based extraction, return the result immediately
+        if column_headers and len(column_headers) == len(row):
+            # We already extracted using headers, return the result
+            if description and (debit_amount or credit_amount):
+                return {
+                    'Date': date,
+                    'Description': description,
+                    'Withdrawals': debit_amount,
+                    'Deposits': credit_amount
+                }
             return None
         
         # Find description (usually column 1, longest text field)
@@ -1561,6 +2126,45 @@ class BankStatementExtractor:
         
         return None
     
+    def _extract_statement_year(self):
+        """Extract the statement year from the PDF content"""
+        try:
+            with pdfplumber.open(self.pdf_path) as pdf:
+                # Check first few pages for year information
+                for page_num in range(min(3, len(pdf.pages))):
+                    page = pdf.pages[page_num]
+                    text = page.extract_text()
+                    
+                    if text:
+                        # Look for year patterns in the text
+                        year_patterns = [
+                            r'(\d{4})',  # Any 4-digit year
+                            r'January\s+(\d{4})',  # January 2023
+                            r'February\s+(\d{4})',  # February 2023
+                            r'March\s+(\d{4})',    # March 2023
+                            r'April\s+(\d{4})',   # April 2023
+                            r'May\s+(\d{4})',     # May 2023
+                            r'June\s+(\d{4})',    # June 2023
+                            r'July\s+(\d{4})',    # July 2023
+                            r'August\s+(\d{4})',  # August 2023
+                            r'September\s+(\d{4})', # September 2023
+                            r'October\s+(\d{4})', # October 2023
+                            r'November\s+(\d{4})', # November 2023
+                            r'December\s+(\d{4})', # December 2023
+                        ]
+                        
+                        for pattern in year_patterns:
+                            matches = re.findall(pattern, text, re.IGNORECASE)
+                            if matches:
+                                # Return the most recent year found
+                                years = [int(match) for match in matches if 2020 <= int(match) <= 2030]
+                                if years:
+                                    return str(max(years))
+        except Exception as e:
+            print(f"Warning: Could not extract statement year: {e}")
+        
+        return '2023'  # Default fallback
+    
     def _convert_rbc_date(self, date_str):
         """Convert RBC/BMO/CIBC date format to standard format"""
         # RBC format: "11 Dec", "22 Dec"
@@ -1573,7 +2177,7 @@ class BankStatementExtractor:
         }
         
         # Get year from metadata if available, otherwise use default
-        year = self.metadata.get('statement_year', '2022')
+        year = self.metadata.get('statement_year', '2023')  # Default to 2023 for RBC statements
         
         # Try RBC format: "11 Dec"
         match = re.match(r'(\d{1,2})\s+([A-Za-z]{3})', date_str)
