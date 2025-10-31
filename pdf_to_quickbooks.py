@@ -195,14 +195,44 @@ class PDFToQuickBooks:
         
         # Step 1: Extract transactions from PDF
         print("\n📋 STEP 1: Extracting transactions from PDF...")
-        df = extract_from_pdf(pdf_path, save_excel=False)
+        df_extracted = extract_from_pdf(pdf_path, save_excel=False)
+        # Keep original extracted DF for later RB merge if needed
+        self._last_extracted_df = df_extracted.copy() if df_extracted is not None else None
         
-        if df is None or len(df) == 0:
+        if df_extracted is None or len(df_extracted) == 0:
             print("❌ Failed to extract transactions from PDF")
             return None
         
+        # Preserve Running_Balance computed during extraction (if available)
+        extracted_with_keys = df_extracted.copy()
+        extracted_with_keys['Withdrawals'] = pd.to_numeric(extracted_with_keys.get('Withdrawals'), errors='coerce').fillna(0)
+        extracted_with_keys['Deposits'] = pd.to_numeric(extracted_with_keys.get('Deposits'), errors='coerce').fillna(0)
+        # Build a robust matching key using original columns
+        def _mk_key(df):
+            return (
+                df['Date'].astype(str).str.strip() + '|' +
+                df['Description'].astype(str).str.strip() + '|' +
+                df['Withdrawals'].round(2).astype(str) + '|' +
+                df['Deposits'].round(2).astype(str)
+            )
+        extracted_with_keys['_match_key'] = _mk_key(extracted_with_keys)
+        extracted_running = extracted_with_keys[['_match_key', 'Running_Balance']] if 'Running_Balance' in extracted_with_keys.columns else None
+
         # Convert to standard format (Date, Description, Amount)
-        df, was_credit_card = self._convert_to_standard_format(df, is_credit_card=is_credit_card)
+        df, was_credit_card = self._convert_to_standard_format(df_extracted, is_credit_card=is_credit_card)
+
+        # Recreate the same key on the converted frame to merge Running_Balance
+        df['_w'] = df['Amount'].apply(lambda x: -x if x < 0 else 0)
+        df['_d'] = df['Amount'].apply(lambda x: x if x > 0 else 0)
+        df['_match_key'] = (
+            df['Date'].astype(str).str.strip() + '|' +
+            df['Description'].astype(str).str.strip() + '|' +
+            df['_w'].round(2).astype(str) + '|' +
+            df['_d'].round(2).astype(str)
+        )
+        if extracted_running is not None:
+            df = df.merge(extracted_running, on='_match_key', how='left')
+        df = df.drop(columns=['_w', '_d', '_match_key'], errors='ignore')
         
         # Step 2: Predict account categories
         print("\n🧠 STEP 2: Predicting account categories...")
@@ -247,7 +277,20 @@ class PDFToQuickBooks:
         - Combined DataFrame with all predictions
         """
         folder = Path(folder_path)
-        pdf_files = list(folder.glob('*.pdf'))
+        # Preserve folder visual order by natural-sorting on the numeric prefix if present
+        names = [f for f in os.listdir(folder) if f.lower().endswith('.pdf')]
+        def numeric_prefix(name):
+            # Handles prefixes like "-2. Febuary 2023.pdf", "10. January 2024.pdf", "7. October 2023.pdf"
+            m = re.match(r'^\s*([+-]?\d+)\.', name)
+            return int(m.group(1)) if m else None
+        with_prefix = [(numeric_prefix(n), n) for n in names]
+        if any(p is not None for p,_ in with_prefix):
+            with_prefix.sort(key=lambda x: (float('inf') if x[0] is None else x[0]))
+            ordered = [n for _, n in with_prefix]
+        else:
+            # Fallback to unsorted listing order
+            ordered = names
+        pdf_files = [folder / n for n in ordered]
         
         if not pdf_files:
             print(f"❌ No PDF files found in {folder_path}")
@@ -452,6 +495,9 @@ class PDFToQuickBooks:
         essential_cols = ['Date', 'Description', 'Amount']
         if 'Balance' in df.columns:
             essential_cols.append('Balance')
+        # Preserve the exact Running_Balance computed during extraction if present
+        if 'Running_Balance' in df.columns:
+            essential_cols.append('Running_Balance')
         
         df = df[essential_cols].copy()
         
@@ -466,7 +512,73 @@ class PDFToQuickBooks:
         - output_path: Path to save Excel file
         - is_credit_card: If True, invert amounts back to credit card format for display
         """
+        # If Running_Balance is missing, attempt to merge from last extracted frame
+        if 'Running_Balance' not in df.columns and hasattr(self, '_last_extracted_df') and isinstance(self._last_extracted_df, pd.DataFrame):
+            src = self._last_extracted_df.copy()
+            if not src.empty:
+                src['Withdrawals'] = pd.to_numeric(src.get('Withdrawals'), errors='coerce').fillna(0)
+                src['Deposits'] = pd.to_numeric(src.get('Deposits'), errors='coerce').fillna(0)
+                src['_match_key'] = (
+                    src['Date'].astype(str).str.strip() + '|' +
+                    src['Description'].astype(str).str.strip() + '|' +
+                    src['Withdrawals'].round(2).astype(str) + '|' +
+                    src['Deposits'].round(2).astype(str)
+                )
+                temp = df.copy()
+                temp['_w'] = temp['Amount'].apply(lambda x: -x if x < 0 else 0)
+                temp['_d'] = temp['Amount'].apply(lambda x: x if x > 0 else 0)
+                temp['_match_key'] = (
+                    temp['Date'].astype(str).str.strip() + '|' +
+                    temp['Description'].astype(str).str.strip() + '|' +
+                    temp['_w'].round(2).astype(str) + '|' +
+                    temp['_d'].round(2).astype(str)
+                )
+                rb_map = src[['_match_key','Running_Balance']] if 'Running_Balance' in src.columns else None
+                if rb_map is not None:
+                    temp = temp.merge(rb_map, on='_match_key', how='left')
+                    df['Running_Balance'] = temp['Running_Balance']
+                df.drop(columns=[c for c in ['_w','_d','_match_key'] if c in df.columns], inplace=True, errors='ignore')
+
+        # Harmonize Date with extractor's Date (to preserve correct statement year)
+        if hasattr(self, '_last_extracted_df') and isinstance(self._last_extracted_df, pd.DataFrame):
+            srcD = self._last_extracted_df.copy()
+            if not srcD.empty:
+                srcD['Withdrawals'] = pd.to_numeric(srcD.get('Withdrawals'), errors='coerce').fillna(0)
+                srcD['Deposits'] = pd.to_numeric(srcD.get('Deposits'), errors='coerce').fillna(0)
+                srcD['_match_key'] = (
+                    srcD['Date'].astype(str).str.strip() + '|' +
+                    srcD['Description'].astype(str).str.strip() + '|' +
+                    srcD['Withdrawals'].round(2).astype(str) + '|' +
+                    srcD['Deposits'].round(2).astype(str)
+                )
+                tempD = df.copy()
+                tempD['_w'] = tempD['Amount'].apply(lambda x: -x if x < 0 else 0)
+                tempD['_d'] = tempD['Amount'].apply(lambda x: x if x > 0 else 0)
+                tempD['_match_key'] = (
+                    tempD['Date'].astype(str).str.strip() + '|' +
+                    tempD['Description'].astype(str).str.strip() + '|' +
+                    tempD['_w'].round(2).astype(str) + '|' +
+                    tempD['_d'].round(2).astype(str)
+                )
+                date_map = srcD[['_match_key','Date']]
+                tempD = tempD.merge(date_map, on='_match_key', how='left', suffixes=('', '_src'))
+                # If a source Date is available, use it
+                if 'Date_src' in tempD.columns:
+                    try:
+                        df['Date'] = pd.to_datetime(tempD['Date_src'], errors='coerce')
+                    except Exception:
+                        pass
+                df.drop(columns=[c for c in ['_w','_d','_match_key'] if c in df.columns], inplace=True, errors='ignore')
+
         # Prepare display DataFrame
+        # Compute Amount as shown in Excel (respect credit-card inversion)
+        amt_display = -df['Amount'] if is_credit_card else df['Amount']
+        # Running total should follow the same sign convention as displayed Amount
+        # If multiple source files are combined, keep separate running totals per source file
+        if 'Source_File' in df.columns:
+            running_total = amt_display.groupby(df['Source_File']).cumsum()
+        else:
+            running_total = amt_display.cumsum()
         if is_credit_card:
             # Credit cards: Keep single Amount column with inverted signs
             display_df = df[[
@@ -475,13 +587,17 @@ class PDFToQuickBooks:
             
             # Invert amounts back to original format for Excel display
             display_df['Amount'] = -display_df['Amount']
+            display_df['Running Total'] = running_total  # already in display sign convention
             print(f"  💳 Inverting amounts back to credit card format for Excel")
             print(f"     Charges will show as positive, payments as negative")
             
             # Format columns
             display_df['Date'] = display_df['Date'].dt.strftime('%Y-%m-%d')
             display_df['Amount'] = display_df['Amount'].apply(lambda x: f"${x:,.2f}")
+            display_df['Running Total'] = display_df['Running Total'].apply(lambda x: f"${x:,.2f}")
             display_df['Confidence'] = display_df['Confidence'].apply(lambda x: f"{x:.1%}")
+            # Reorder columns: place Running Total left of Confidence
+            display_df = display_df[['Date', 'Description', 'Amount', 'Running Total', 'Account', 'Confidence']]
         else:
             # Bank statements: Split into Debit and Deposit columns
             display_df = df[['Date', 'Description', 'Account', 'Confidence']].copy()
@@ -489,9 +605,16 @@ class PDFToQuickBooks:
             # Create Debit and Deposit columns (use None for empty cells, not empty string)
             display_df['Debit'] = df['Amount'].apply(lambda x: f"${abs(x):,.2f}" if x < 0 else None)
             display_df['Deposit'] = df['Amount'].apply(lambda x: f"${x:,.2f}" if x > 0 else None)
+            # Prefer Running_Balance from extractor when available; fallback to computed running_total
+            if 'Running_Balance' in df.columns:
+                running_balance_display = df['Running_Balance']
+            else:
+                running_balance_display = running_total
+            # Use the "Running Total" label consistently
+            display_df['Running Total'] = running_balance_display.apply(lambda x: f"${x:,.2f}")
             
-            # Reorder columns: Date, Description, Debit, Deposit, Account, Confidence
-            display_df = display_df[['Date', 'Description', 'Debit', 'Deposit', 'Account', 'Confidence']]
+            # Reorder columns: Date, Description, Account, Debit, Deposit, Running Total, Confidence
+            display_df = display_df[['Date', 'Description', 'Account', 'Debit', 'Deposit', 'Running Total', 'Confidence']]
             
             # Format columns
             display_df['Date'] = display_df['Date'].dt.strftime('%Y-%m-%d')
@@ -628,8 +751,12 @@ def main():
     
     # Process input
     if os.path.isfile(input_path):
-        # Single PDF file
-        pipeline.process_pdf(input_path, is_credit_card=is_credit_card)
+        # Single PDF file - auto-save outputs next to the input PDF
+        pdf_path = Path(input_path)
+        base = pdf_path.with_suffix('')
+        out_excel = str(base) + "_categorized.xlsx"
+        out_iif = str(base) + "_quickbooks.iif"
+        pipeline.process_pdf(input_path, output_excel=out_excel, output_quickbooks=out_iif, is_credit_card=is_credit_card)
     elif os.path.isdir(input_path):
         # Folder of PDFs - use process_folder to create combined file
         pipeline.process_folder(input_path, is_credit_card=is_credit_card)

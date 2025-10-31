@@ -342,15 +342,19 @@ class BankStatementExtractor:
             r'as of.*?(\d{4})',  # "as of ... 2021"
         ]
         
-        for pattern in year_patterns:
-            match = re.search(pattern, text_lower)
-            if match:
-                year = match.group(1)
-                # Handle 2-digit years (22 -> 2022)
-                if len(year) == 2:
-                    year = '20' + year
-                self.metadata['statement_year'] = year
-                break
+        # Only extract year if not already set (to avoid overwriting correct year from _extract_statement_year)
+        if not self.metadata.get('statement_year'):
+            for pattern in year_patterns:
+                match = re.search(pattern, text_lower)
+                if match:
+                    year = match.group(1)
+                    # Handle 2-digit years (22 -> 2022)
+                    if len(year) == 2:
+                        year = '20' + year
+                    # Validate year is reasonable (2015-2035)
+                    if 2015 <= int(year) <= 2035:
+                        self.metadata['statement_year'] = year
+                        break
         
         if self.metadata['bank']:
             print(f"🏦 Detected bank: {self.metadata['bank']}")
@@ -731,8 +735,15 @@ class BankStatementExtractor:
             df['Deposits'] = df['Amount_Clean'].apply(lambda x: x if x and '-' not in str(x) and '(' not in str(x) and x != 'None' else None)
             df = df.drop(['Amount', 'Amount_Clean'], axis=1)
         
-        # Keep only standard columns (exclude Balance for cleaner output)
+        # Keep standard columns
+        # For RBC, preserve Balance column as it's reliable from Camelot extraction
+        # For other banks, preserve Balance if available (they might use it)
         standard_cols = ['Date', 'Description', 'Withdrawals', 'Deposits']
+        
+        # Preserve Balance column if it exists (especially important for RBC)
+        if 'Balance' in df.columns:
+            standard_cols.append('Balance')
+        
         available_cols = [c for c in standard_cols if c in df.columns]
         
         if not available_cols:
@@ -767,6 +778,8 @@ class BankStatementExtractor:
         # 3. Clean Description column
         if 'Description' in df.columns:
             df['Description'] = df['Description'].astype(str).str.strip()
+            # Normalize spacing and tokenization issues (e.g., 'Misc PaymentAMEX' → 'Misc Payment AMEX')
+            df['Description'] = df['Description'].apply(self._normalize_description_text)
             # Remove "balance forward" text from descriptions but keep the transaction
             df['Description'] = df['Description'].str.replace(r'\bbalance forward\b', '', case=False, regex=True)
             # Remove "Account Fees: $X.XX" suffix from descriptions (RBC specific)
@@ -820,12 +833,27 @@ class BankStatementExtractor:
             # Don't deduplicate - keep original df
             self.removed_transactions = None
         
+        # 6b. Extra-conservative pass for RBC: remove only adjacent exact duplicates
+        # This catches page-repeat artifacts while preserving legitimate repeated transactions
+        if self.metadata.get('bank') == 'RBC' and len(df) > 1:
+            df = df.reset_index(drop=True)
+            adjacent_subset = ['Date', 'Description', 'Withdrawals', 'Deposits']
+            common_cols = [c for c in adjacent_subset if c in df.columns]
+            if len(common_cols) == 4:
+                same_as_prev = (df[common_cols] == df[common_cols].shift(1)).all(axis=1)
+                # Never remove known legitimate repeats like BR TO BR transfers
+                protect_legit = df['Description'].str.contains(r'BR TO BR', case=False, na=False)
+                to_drop = same_as_prev & (~protect_legit)
+                removed_adjacent = int(to_drop.sum())
+                if removed_adjacent > 0:
+                    print(f"  Removed {removed_adjacent} adjacent duplicate transactions (RBC page-repeat)")
+                    df = df[~to_drop]
+
         # 7. Reset index
         df = df.reset_index(drop=True)
         
-        # 8. Add running balance verification for RBC statements
-        if self.metadata.get('bank') == 'RBC':
-            df = self._verify_running_balance(df)
+        # 8. Add running balance verification for all banks (was RBC-only)
+        df = self._verify_running_balance(df)
         
         removed_count = original_count - len(df)
         if removed_count > 0:
@@ -880,6 +908,27 @@ class BankStatementExtractor:
         mask = df['Description'].apply(lambda x: not is_header_or_footer(x))
         
         return df[mask]
+
+    def _normalize_description_text(self, text):
+        """Normalize description spacing and common tokenization issues.
+        - Trim
+        - Replace newlines with a single space
+        - Collapse multiple spaces to single
+        - Ensure a space after 'Misc Payment' if missing
+        """
+        s = str(text or '')
+        # Remove surrounding quotes that may come from CSV/Excel exports
+        if len(s) >= 2 and ((s[0] == '"' and s[-1] == '"') or (s[0] == "'" and s[-1] == "'")):
+            s = s[1:-1]
+        # Normalize newlines → single space
+        s = re.sub(r"[\r\n]+", " ", s)
+        s = s.strip()
+        # Ensure a space after 'Misc Payment' even if Camelot concatenated the next token
+        s = re.sub(r'(?i)\bmisc\s+payment(?=\S)', 'Misc Payment ', s)
+        s = re.sub(r'(?i)\bmisc\s*payment\s*(?=\S)', 'Misc Payment ', s)
+        # Collapse any repeated whitespace
+        s = re.sub(r'\s+', ' ', s)
+        return s.strip()
     
     def _smart_deduplicate_rbc(self, df, duplicate_subset):
         """Smart deduplication for RBC statements using running balance"""
@@ -935,6 +984,38 @@ class BankStatementExtractor:
         # Extract opening and closing balances from the PDF
         opening_balance, closing_balance = self._extract_opening_closing_balances()
         
+        bank = (self.metadata.get('bank') or '').upper()
+        
+        # CIBC-specific: prefer deriving opening/closing from the statement Balance column table
+        # even if regex found values, as regex may pick summary artifacts
+        if bank == 'CIBC':
+            if 'Balance' in df.columns and df['Balance'].notna().any():
+                first_idx = df['Balance'].first_valid_index()
+                last_idx = df['Balance'].last_valid_index()
+                if first_idx is not None and last_idx is not None:
+                    first_row = df.loc[first_idx]
+                    first_w = float(first_row.get('Withdrawals', 0)) if pd.notna(first_row.get('Withdrawals')) else 0
+                    first_d = float(first_row.get('Deposits', 0)) if pd.notna(first_row.get('Deposits')) else 0
+                    first_net = first_d - first_w
+                    inferred_open = float(first_row['Balance']) - first_net
+                    opening_balance = inferred_open
+                    closing_balance = float(df.loc[last_idx]['Balance'])
+        
+        # Fallbacks by using Balance column if present (for all banks including RBC)
+        if opening_balance is None or closing_balance is None:
+            if 'Balance' in df.columns and df['Balance'].notna().any():
+                first_idx = df['Balance'].first_valid_index()
+                last_idx = df['Balance'].last_valid_index()
+                if first_idx is not None and last_idx is not None:
+                    # Infer opening as balance before first transaction
+                    first_row = df.loc[first_idx]
+                    first_w = float(first_row.get('Withdrawals', 0)) if pd.notna(first_row.get('Withdrawals')) else 0
+                    first_d = float(first_row.get('Deposits', 0)) if pd.notna(first_row.get('Deposits')) else 0
+                    first_net = first_d - first_w
+                    inferred_open = float(first_row['Balance']) - first_net
+                    opening_balance = inferred_open if opening_balance is None else opening_balance
+                    closing_balance = float(df.loc[last_idx]['Balance']) if closing_balance is None else closing_balance
+            
         if opening_balance is None or closing_balance is None:
             print("    ⚠️  Could not extract opening/closing balances from PDF")
             return df
@@ -947,7 +1028,13 @@ class BankStatementExtractor:
         running_balance = opening_balance
         
         # Check if we have actual balance values from the statement
+        # CIBC: Ignore Balance column, calculate from opening + flows
+        # Other banks: Use Balance column if available, otherwise calculate
         has_balance_column = 'Balance' in df.columns
+        if bank == 'CIBC':
+            # CIBC: ignore the per-row Balance column for running steps; compute from opening + flows
+            has_balance_column = False
+        
         print(f"    📊 Has Balance column: {has_balance_column}")
         if has_balance_column:
             non_null_balance_count = df['Balance'].notna().sum()
@@ -1292,6 +1379,7 @@ class BankStatementExtractor:
             print(f"    ❌ No combinations found close to target amount")
             print(f"    💡 This suggests the missing transaction is not in the current data")
     
+    
     def _extract_opening_closing_balances(self):
         """Extract opening and closing balances from the PDF"""
         try:
@@ -1305,42 +1393,119 @@ class BankStatementExtractor:
                     text = page.extract_text()
                     
                     if text:
+                        bank = (self.metadata.get('bank') or '').upper()
+                        # Normalize some whitespace and currency formatting noise to help regex
+                        norm = text
+                        norm = re.sub(r"\s+", " ", norm)
+                        norm = norm.replace("C$", "$")
+                        norm = norm.replace("USD$", "$")
+                        norm = norm.replace("CAD$", "$")
+                        # Sometimes colon or equals used: unify to space
+                        norm = norm.replace(":", " ").replace("=", " ")
+                        
+                        # Bank-specific patterns (check first before generic patterns)
+                        if bank == 'CIBC':
+                            # Look for "Opening balance on Nov 1, 2023 $24,142.56"
+                            cibc_open_match = re.search(r'Opening\s+balance\s+on\s+\w+\s+\d+,\s*\d{4}\s+\$?([\d,]+\.?\d*)', norm, re.IGNORECASE)
+                            if cibc_open_match:
+                                opening_balance = float(cibc_open_match.group(1).replace(',', ''))
+                            
+                            # Look for "Closing balance on Nov 30, 2023 = $43,605.77"
+                            # Note: norm already replaced "=" with space, so look for both patterns
+                            cibc_close_match = re.search(r'Closing\s+balance\s+on\s+\w+\s+\d+,\s*\d{4}\s+\$?([\d,]+\.?\d*)', norm, re.IGNORECASE)
+                            if cibc_close_match:
+                                closing_balance = float(cibc_close_match.group(1).replace(',', ''))
+                            
+                            if opening_balance and closing_balance:
+                                break
+                            # Continue to generic patterns if CIBC-specific didn't match
+                        
+                        # RBC-specific patterns (check before generic patterns)
+                        if bank == 'RBC':
+                            # RBC text is often extracted without spaces: "OpeningbalanceonDecember11,2020 $2,245.89" or "-$1,345.99"
+                            # Pattern must match with or without spaces and handle negative balances
+                            # Look for "Opening balance on [Month] [day], [year] -?$[amount]" or "Openingbalanceon[Month][day],[year] -?$[amount]"
+                            # Must have $ sign before amount to avoid matching dates
+                            # Handle negative balances: "OpeningbalanceonMarch31,2023 -$1,345.99"
+                            rbc_open_match = re.search(r'Opening\s*balance\s*on\s*\w+\s*\d+,\s*\d{4}\s+-?\$\s*([\d,]+\.\d{2})', norm, re.IGNORECASE)
+                            if rbc_open_match:
+                                amount_str = rbc_open_match.group(1).replace(',', '')
+                                # Check if the balance is negative by looking at the full match
+                                full_match = rbc_open_match.group(0)
+                                is_negative = '-' in full_match
+                                opening_balance = float(amount_str)
+                                if is_negative:
+                                    opening_balance = -opening_balance
+                            
+                            # Look for "Closing balance on [Month] [day], [year] = -?$[amount]" or "Closingbalanceon[Month][day],[year] -?$[amount]"
+                            # Note: norm already replaced "=" with space
+                            rbc_close_match = re.search(r'Closing\s*balance\s*on\s*\w+\s*\d+,\s*\d{4}\s+-?\$\s*([\d,]+\.\d{2})', norm, re.IGNORECASE)
+                            if rbc_close_match:
+                                amount_str = rbc_close_match.group(1).replace(',', '')
+                                # Check if the balance is negative by looking at the full match
+                                full_match = rbc_close_match.group(0)
+                                is_negative = '-' in full_match
+                                closing_balance = float(amount_str)
+                                if is_negative:
+                                    closing_balance = -closing_balance
+                            
+                            if opening_balance is not None and closing_balance is not None:
+                                break
+                            # Continue to generic patterns if RBC-specific didn't match
+                        
                         # Look for opening balance patterns
                         opening_patterns = [
-                            r'Opening balance.*?-\$?([\d,]+\.?\d*)',  # Negative opening balance
-                            r'Opening balance.*?\$?([\d,]+\.?\d*)',     # Positive opening balance
-                            r'Beginning balance.*?-\$?([\d,]+\.?\d*)', # Negative beginning balance
-                            r'Beginning balance.*?\$?([\d,]+\.?\d*)',  # Positive beginning balance
-                            r'Previous balance.*?-\$?([\d,]+\.?\d*)', # Negative previous balance
-                            r'Previous balance.*?\$?([\d,]+\.?\d*)',   # Positive previous balance
-                            r'Openingbalanceon.*?-\$([\d,]+\.?\d*)',  # RBC format negative
-                            r'Openingbalanceon.*?\$([\d,]+\.?\d*)'    # RBC format positive
+                            # Generic
+                            r'Opening\s*balance[^\d\-]*-?\$?([\d,]+\.?\d*)',
+                            r'Beginning\s*balance[^\d\-]*-?\$?([\d,]+\.?\d*)',
+                            r'Previous\s*balance[^\d\-]*-?\$?([\d,]+\.?\d*)',
+                            r'Balance\s*Forward[^\d\-]*-?\$?([\d,]+\.?\d*)',
+                            # RBC variants (legacy patterns for old format)
+                            r'Openingbalanceon[^\d]*-\$([\d,]+\.?\d*)',
+                            r'Openingbalanceon[^\d]*\$([\d,]+\.?\d*)',
+                            # TD variants
+                            r'Balance\s*from\s*previous\s*statement[^\d\-]*-?\$?([\d,]+\.?\d*)',
+                            r'Balance\s*Brought\s*Forward[^\d\-]*-?\$?([\d,]+\.?\d*)',
+                            # Scotiabank variants
+                            r'Previous\s*Account\s*Balance[^\d\-]*-?\$?([\d,]+\.?\d*)',
+                            # BMO variants
+                            r'BALANCE\s*FORWARD[^\d\-]*-?\$?([\d,]+\.?\d*)',
                         ]
                         
                         for pattern in opening_patterns:
-                            matches = re.findall(pattern, text, re.IGNORECASE)
+                            matches = re.findall(pattern, norm, re.IGNORECASE)
                             if matches:
                                 opening_balance = float(matches[0].replace(',', ''))
                                 # Check if this was a negative balance pattern
-                                if '-\$' in pattern:
+                                if r'-\$' in pattern:
                                     opening_balance = -opening_balance
                                 break
                         
                         # Look for closing balance patterns
                         closing_patterns = [
-                            r'Closing balance.*?\$?([\d,]+\.?\d*)',
-                            r'Ending balance.*?\$?([\d,]+\.?\d*)',
-                            r'Current balance.*?\$?([\d,]+\.?\d*)',
-                            r'Closingbalanceon.*?=\s*-\$([\d,]+\.?\d*)',  # RBC format with negative
-                            r'Closingbalanceon.*?=\s*\$([\d,]+\.?\d*)'   # RBC format positive
+                            # Generic
+                            r'Closing\s*balance[^\d\-]*-?\$?([\d,]+\.?\d*)',
+                            r'Ending\s*balance[^\d\-]*-?\$?([\d,]+\.?\d*)',
+                            r'Current\s*balance[^\d\-]*-?\$?([\d,]+\.?\d*)',
+                            # RBC variants (legacy patterns for old format)
+                            r'Closingbalanceon[^\d]*-\$([\d,]+\.?\d*)',
+                            r'Closingbalanceon[^\d]*\$([\d,]+\.?\d*)',
+                            # TD variants
+                            r'New\s*balance[^\d\-]*-?\$?([\d,]+\.?\d*)',
+                            r'Closing\s*Balance\s*as\s*of[^\d\-]*-?\$?([\d,]+\.?\d*)',
+                            r'New\s*Account\s*Balance[^\d\-]*-?\$?([\d,]+\.?\d*)',
+                            # Scotiabank variants
+                            r'Closing\s*Account\s*Balance[^\d\-]*-?\$?([\d,]+\.?\d*)',
+                            # BMO variants
+                            r'NEW\s*BALANCE[^\d\-]*-?\$?([\d,]+\.?\d*)',
                         ]
                         
                         for pattern in closing_patterns:
-                            matches = re.findall(pattern, text, re.IGNORECASE)
+                            matches = re.findall(pattern, norm, re.IGNORECASE)
                             if matches:
                                 closing_balance = float(matches[0].replace(',', ''))
                                 # Check if this was a negative balance pattern
-                                if '-\$' in pattern:
+                                if r'-\$' in pattern:
                                     closing_balance = -closing_balance
                                 break
                         
@@ -1376,13 +1541,42 @@ class BankStatementExtractor:
                 # Add year if not present
                 if not re.search(r'\d{4}', date_str):
                     # Use statement year from metadata if available, otherwise current year
-                    year = self.metadata.get('statement_year', 2023)  # Default to 2023 instead of current year
+                    year = str(self.metadata.get('statement_year', '2023'))  # Ensure string
                     date_str = f"{date_str} {year}"
                 return date_parser.parse(date_str)
             
-            # Format 2: 01/15/2024 or 2024/01/15
+            # Format 2: 01/15 or 01/15/2024 or 01/15/24 → normalize; CIBC uses MM/DD formats
             elif '/' in date_str:
-                return date_parser.parse(date_str)
+                bank = (self.metadata.get('bank') or '').upper()
+                if re.match(r'^\d{1,2}/\d{1,2}(/\d{2,4})?$', date_str.strip()):
+                    yr = str(self.metadata.get('statement_year', '2023'))  # Ensure string
+                    # If year absent or 2-digit, force to statement_year
+                    parts = date_str.strip().split('/')
+                    if len(parts) == 2:
+                        mm, dd = parts
+                        norm = f"{yr}-{int(mm):02d}-{int(dd):02d}"
+                        return date_parser.parse(norm)
+                    elif len(parts) == 3:
+                        mm, dd, yy = parts
+                        # If year is 2-digit or doesn't match statement_year, use statement_year
+                        if len(yy) <= 2 or int(yy) < 2015 or int(yy) > 2035:
+                            norm = f"{yr}-{int(mm):02d}-{int(dd):02d}"
+                        else:
+                            norm = f"{yy}-{int(mm):02d}-{int(dd):02d}"
+                        return date_parser.parse(norm)
+                # Fallback: parse as-is (but try to apply statement_year if no year)
+                parsed = date_parser.parse(date_str)
+                # If parsed year seems wrong (before 2015), try applying statement_year
+                if parsed and parsed.year < 2015:
+                    yr = str(self.metadata.get('statement_year', '2023'))
+                    # Try to extract month/day and reconstruct with statement_year
+                    if '/' in date_str:
+                        parts = date_str.strip().split('/')
+                        if len(parts) >= 2:
+                            mm, dd = parts[0], parts[1]
+                            norm = f"{yr}-{int(mm):02d}-{int(dd):02d}"
+                            return date_parser.parse(norm)
+                return parsed
             
             # Format 3: 2024-01-15
             elif '-' in date_str:
@@ -1510,12 +1704,16 @@ class BankStatementExtractor:
                             print(f"Camelot RBC: Keeping all {len(camelot_df)} transactions (no deduplication)")
                             camelot_transactions = camelot_df.to_dict('records')
                         else:
-                            # For other banks, use deduplication
-                            if 'Balance' in camelot_df.columns:
-                                camelot_df = camelot_df.drop_duplicates(subset=['Date', 'Description', 'Withdrawals', 'Deposits', 'Balance'])
-                                print(f"Camelot deduplication: Using Balance column to preserve transactions with different balances")
+                            # For other banks, be conservative: if Scotiabank, skip dedup entirely
+                            if self.metadata.get('bank') == 'Scotiabank':
+                                print(f"Camelot Scotiabank: Keeping all {len(camelot_df)} transactions (no deduplication)")
                             else:
-                                camelot_df = camelot_df.drop_duplicates(subset=['Date', 'Description', 'Withdrawals', 'Deposits'])
+                                # Use deduplication; prefer Balance-aware when available
+                                if 'Balance' in camelot_df.columns:
+                                    camelot_df = camelot_df.drop_duplicates(subset=['Date', 'Description', 'Withdrawals', 'Deposits', 'Balance'])
+                                    print(f"Camelot deduplication: Using Balance column to preserve transactions with different balances")
+                                else:
+                                    camelot_df = camelot_df.drop_duplicates(subset=['Date', 'Description', 'Withdrawals', 'Deposits'])
                             
                             camelot_transactions = camelot_df.to_dict('records')
                             print(f"After Camelot deduplication: {len(camelot_transactions)} unique transactions")
@@ -1900,12 +2098,22 @@ class BankStatementExtractor:
                 date = row[date_col] if date_col < len(row) else None
             
             if desc_col is not None:
-                description = row[desc_col] if desc_col < len(row) else None
-                # Also check next column for additional description text
-                if desc_col + 1 < len(row) and row[desc_col + 1]:
-                    additional_desc = row[desc_col + 1]
-                    if not re.match(r'^[\d,]+\.\d{2}$', additional_desc.replace(',', '')):
-                        description += ' ' + additional_desc
+                # Combine all contiguous description fragments between 'Description' and first amount column
+                # Determine first amount column index among debit/credit/balance-like cells
+                first_amount_idx = None
+                for i in range(desc_col + 1, len(row)):
+                    cell = row[i] or ''
+                    if cell and re.match(r'^[\d,]+\.\d{2}$', str(cell).replace(',', '')):
+                        first_amount_idx = i
+                        break
+                if first_amount_idx is None:
+                    first_amount_idx = len(row)
+                parts = []
+                for i in range(desc_col, first_amount_idx):
+                    val = str(row[i] or '').strip()
+                    if val and not re.match(r'^[\d,]+\.\d{2}$', val.replace(',', '')):
+                        parts.append(val)
+                description = ' '.join(parts).strip() if parts else None
             
             if debit_col is not None and debit_col < len(row):
                 debit_value = row[debit_col]
@@ -2099,30 +2307,14 @@ class BankStatementExtractor:
         if date:
             date = self._convert_rbc_date(date)
         
-        # Extract balance if available (usually the last amount column)
-        balance_amount = None
-        if len(row) >= 4:  # Need at least Date, Description, Amount, Balance
-            # Look for balance in the last column or second-to-last column
-            for i in range(len(row) - 1, max(2, len(row) - 3), -1):  # Check last few columns
-                if row[i] and re.match(r'^[\d,]+\.\d{2}$', row[i].replace(',', '')):
-                    # This is likely the balance column
-                    balance_amount = row[i]
-                    break
-        
         # Return transaction if we have date, description, and at least one amount
         if date and description and (debit_amount or credit_amount):
-            transaction = {
+            return {
                 'Date': date,
                 'Description': description,
                 'Withdrawals': debit_amount,
                 'Deposits': credit_amount
             }
-            
-            # Add balance if found
-            if balance_amount:
-                transaction['Balance'] = balance_amount
-            
-            return transaction
         
         return None
     
@@ -2136,33 +2328,56 @@ class BankStatementExtractor:
                     text = page.extract_text()
                     
                     if text:
-                        # Look for year patterns in the text
-                        year_patterns = [
-                            r'(\d{4})',  # Any 4-digit year
-                            r'January\s+(\d{4})',  # January 2023
-                            r'February\s+(\d{4})',  # February 2023
-                            r'March\s+(\d{4})',    # March 2023
-                            r'April\s+(\d{4})',   # April 2023
-                            r'May\s+(\d{4})',     # May 2023
-                            r'June\s+(\d{4})',    # June 2023
-                            r'July\s+(\d{4})',    # July 2023
-                            r'August\s+(\d{4})',  # August 2023
-                            r'September\s+(\d{4})', # September 2023
-                            r'October\s+(\d{4})', # October 2023
-                            r'November\s+(\d{4})', # November 2023
-                            r'December\s+(\d{4})', # December 2023
-                        ]
+                        # PRIORITY 1: CIBC explicit statement period phrasing like "For Nov 1 to Nov 30, 2023"
+                        # Match "For <Month> <day> to <Month> <day>, <year>"
+                        m = re.search(r'For\s+\w+\s+\d+\s+to\s+\w+\s+\d+,\s*(\d{4})', text, re.IGNORECASE)
+                        if m:
+                            year_str = m.group(1)
+                            if 2015 <= int(year_str) <= 2035:
+                                print(f"    📅 Extracted statement year from period: {year_str}")
+                                return year_str
                         
-                        for pattern in year_patterns:
-                            matches = re.findall(pattern, text, re.IGNORECASE)
-                            if matches:
-                                # Return the most recent year found
-                                years = [int(match) for match in matches if 2020 <= int(match) <= 2030]
-                                if years:
-                                    return str(max(years))
+                        # PRIORITY 2: Any "for <Month> <day> to <Month> <day>, <year>" (lowercase)
+                        m = re.search(r'for\s+\w+\s+\d+\s+to\s+\w+\s+\d+,\s*(\d{4})', text, re.IGNORECASE)
+                        if m:
+                            year_str = m.group(1)
+                            if 2015 <= int(year_str) <= 2035:
+                                print(f"    📅 Extracted statement year from period: {year_str}")
+                                return year_str
+                        
+                        # PRIORITY 3: Opening/Closing balance lines with year
+                        m = re.search(r'Opening\s+balance\s+on\s+\w+\s+\d+,\s*(\d{4})', text, re.IGNORECASE)
+                        if m:
+                            year_str = m.group(1)
+                            if 2015 <= int(year_str) <= 2035:
+                                print(f"    📅 Extracted statement year from opening balance: {year_str}")
+                                return year_str
+                        
+                        m = re.search(r'Closing\s+balance\s+on\s+\w+\s+\d+,\s*(\d{4})', text, re.IGNORECASE)
+                        if m:
+                            year_str = m.group(1)
+                            if 2015 <= int(year_str) <= 2035:
+                                print(f"    📅 Extracted statement year from closing balance: {year_str}")
+                                return year_str
+                        
+                        # PRIORITY 4: any "to <Month> <day>, <year>"
+                        m = re.search(r'to\s*\w+\s*\d+,\s*(\d{4})', text, re.IGNORECASE)
+                        if m:
+                            year_str = m.group(1)
+                            if 2015 <= int(year_str) <= 2035:
+                                print(f"    📅 Extracted statement year from 'to' pattern: {year_str}")
+                                return year_str
+                        
+                        # Fallback: month + year anywhere on page (bounded range)
+                        m = re.search(r'\b(January|February|March|April|May|June|July|August|September|October|November|December)\b[^\n,]*\b(\d{4})\b', text, re.IGNORECASE)
+                        if m and 2015 <= int(m.group(2)) <= 2035:
+                            year_str = m.group(2)
+                            print(f"    📅 Extracted statement year from month pattern: {year_str}")
+                            return year_str
         except Exception as e:
             print(f"Warning: Could not extract statement year: {e}")
         
+        print(f"    ⚠️  Could not extract statement year, defaulting to 2023")
         return '2023'  # Default fallback
     
     def _convert_rbc_date(self, date_str):
@@ -2177,7 +2392,7 @@ class BankStatementExtractor:
         }
         
         # Get year from metadata if available, otherwise use default
-        year = self.metadata.get('statement_year', '2023')  # Default to 2023 for RBC statements
+        year = str(self.metadata.get('statement_year', '2023'))  # Ensure string
         
         # Try RBC format: "11 Dec"
         match = re.match(r'(\d{1,2})\s+([A-Za-z]{3})', date_str)
@@ -2185,21 +2400,7 @@ class BankStatementExtractor:
             day = match.group(1)
             month_abbr = match.group(2)
             month_num = month_map.get(month_abbr, '01')
-            
-            # For multi-year statements (e.g., Dec 2020 - Jan 2021)
-            # If year from metadata is available, use it intelligently
-            if self.metadata.get('statement_year'):
-                # If it's December and the statement year suggests it could be the previous year
-                if month_abbr == 'Dec' and int(year) > 2020:
-                    # Check if this is a cross-year statement
-                    year = str(int(year) - 1)
-            else:
-                # Fallback logic
-                if month_abbr in ['Dec']:
-                    year = '2020'
-                else:
-                    year = '2021'
-            
+            # Always use the extracted statement year as-is; do not shift December to prior year
             return f"{year}-{month_num}-{day.zfill(2)}"
         
         # Try BMO/CIBC format: "Jan 04"
@@ -2211,6 +2412,15 @@ class BankStatementExtractor:
             
             # Use year from metadata
             return f"{year}-{month_num}-{day.zfill(2)}"
+        
+        # Try numeric formats and normalize to YYYY-MM-DD
+        # Supports MM/DD/YY, MM/DD/YYYY, YYYY/MM/DD
+        try:
+            if '/' in date_str or '-' in date_str:
+                dt = date_parser.parse(date_str, default=datetime(int(year), 1, 1))
+                return dt.strftime('%Y-%m-%d')
+        except Exception:
+            pass
         
         return date_str
 
