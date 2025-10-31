@@ -1028,11 +1028,12 @@ class BankStatementExtractor:
         running_balance = opening_balance
         
         # Check if we have actual balance values from the statement
-        # CIBC: Ignore Balance column, calculate from opening + flows
+        # CIBC and BMO: Ignore Balance column, calculate from opening + flows
         # Other banks: Use Balance column if available, otherwise calculate
         has_balance_column = 'Balance' in df.columns
-        if bank == 'CIBC':
-            # CIBC: ignore the per-row Balance column for running steps; compute from opening + flows
+        if bank == 'CIBC' or bank == 'BMO':
+            # CIBC and BMO: ignore the per-row Balance column for running steps; compute from opening + flows
+            # This ensures consistency and avoids using potentially incorrect balance values
             has_balance_column = False
         
         print(f"    📊 Has Balance column: {has_balance_column}")
@@ -1837,15 +1838,18 @@ class BankStatementExtractor:
         df = df.fillna('')
         
         # Detect column headers from the first few rows
-        for idx, row in df.iterrows():
-            if idx > 5:  # Only check first 5 rows for headers
-                break
-            row_text = ' '.join([str(cell) for cell in row.tolist()]).lower()
-            if 'date' in row_text and 'description' in row_text and ('debit' in row_text or 'cheque' in row_text):
-                # This is likely the header row
-                column_headers = [str(cell).strip() for cell in row.tolist()]
-                print(f"Detected column headers: {column_headers}")
-                break
+        # For BMO, skip header detection (use simple column-position logic like old working version)
+        bank = (self.metadata.get('bank') or '').upper()
+        if bank != 'BMO':
+            for idx, row in df.iterrows():
+                if idx > 5:  # Only check first 5 rows for headers
+                    break
+                row_text = ' '.join([str(cell) for cell in row.tolist()]).lower()
+                if 'date' in row_text and 'description' in row_text and ('debit' in row_text or 'cheque' in row_text):
+                    # This is likely the header row
+                    column_headers = [str(cell).strip() for cell in row.tolist()]
+                    print(f"Detected column headers: {column_headers}")
+                    break
         
         # Remove empty columns to normalize the table structure
         # Some tables have extra empty columns that throw off indexing
@@ -1913,8 +1917,14 @@ class BankStatementExtractor:
             effective_date = row_date or current_date or ''
             
             # Try to extract transaction from this row
+            # For BMO, ignore headers and use simple column-position logic (like old working version)
+            bank = (self.metadata.get('bank') or '').upper()
             if effective_date:
-                transaction = self._extract_transaction_from_row_with_date(row_list, effective_date, column_headers)
+                if bank == 'BMO':
+                    # For BMO, don't pass column_headers - use simple column-position logic
+                    transaction = self._extract_transaction_from_row_with_date(row_list, effective_date, column_headers=None)
+                else:
+                    transaction = self._extract_transaction_from_row_with_date(row_list, effective_date, column_headers)
                 
                 if transaction:
                     # This row has an amount - check if we have pending description to prepend
@@ -2065,7 +2075,9 @@ class BankStatementExtractor:
         return self._extract_transaction_from_row(row_with_date, column_headers)
     
     def _extract_transaction_from_row(self, row, column_headers=None):
-        """Extract transaction data from a single row using column headers when available"""
+        """Extract transaction data from a single row using column headers when available
+        For BMO, use simpler column-position-based logic like the old working version to avoid date/transaction mismatches
+        """
         if len(row) < 4:  # Need at least Date, Description, Debit, Credit columns
             return None
         
@@ -2073,7 +2085,181 @@ class BankStatementExtractor:
         description = None
         debit_amount = None
         credit_amount = None
+        balance_amount = None
         
+        bank = (self.metadata.get('bank') or '').upper()
+        
+        # For BMO, always use simple column-position-based extraction (like old working version)
+        # The header-based extraction can cause date/transaction mismatches
+        # Force BMO to ignore headers and use column positions instead
+        if bank == 'BMO':
+            # BMO: Simple column-based extraction without headers (like old working commit 6a47aae)
+            # The date is already in row[0] from _extract_transaction_from_row_with_date
+            # Find date (usually first column with date pattern)
+            # Supports both "04 Jan" (RBC) and "Jan 04" (BMO)
+            for i, cell in enumerate(row):
+                if re.match(r'^(\d{1,2}\s+[A-Za-z]{3}|[A-Za-z]{3}\s+\d{1,2})$', str(cell).strip()):
+                    date = cell
+                    break
+            
+            if not date:
+                return None
+            
+            # Find description (usually column 1, longest text field)
+            # Allow short descriptions like "PAY" (>= 2 chars, not just > 3)
+            description_candidates = [cell for cell in row[1:] if len(str(cell)) >= 2 and not re.match(r'^[\d,.-]+$', str(cell))]
+            if description_candidates:
+                description = max(description_candidates, key=lambda x: len(str(x)))
+                # Clean up newlines and extra spaces
+                description = str(description).replace('\n', ' ').strip()
+                description = ' '.join(description.split())  # Remove extra spaces
+            
+            # Look for debit and credit amounts in specific columns (like old working version)
+            # Based on Camelot output, amounts can be in columns 2, 3, 4 depending on table structure
+            # Strategy: Find the first two columns that contain monetary amounts
+            if len(row) >= 3:
+                amount_columns = []
+                
+                # Scan columns 2-5 to find debit and credit columns
+                # BMO/RBC formats both have: [Date, Description, Debit(col 2), Credit(col 3), Balance(col 4+)]
+                # Stop after finding 2 amount columns to avoid picking up balance
+                for col_idx in range(2, min(6, len(row))):
+                    col_value = row[col_idx] if col_idx < len(row) else ''
+                    if col_value and re.match(r'^[\d,]+\.\d{2}$', str(col_value).replace(',', '')):
+                        amount_columns.append((col_idx, col_value))
+                        # Stop after finding 2 amount columns to avoid picking up balance
+                        if len(amount_columns) == 2:
+                            break
+                
+                # Determine debit and credit based on which columns have amounts (old working logic)
+                if len(amount_columns) >= 2:
+                    col1_idx = amount_columns[0][0]
+                    col2_idx = amount_columns[1][0]
+                    
+                    # Special case: BMO Table 1 with 4 columns [Date, Desc, Amount, Balance]
+                    if len(row) == 4 and col1_idx == 2 and col2_idx == 3:
+                        # BMO 4-column format - col 2 is amount, col 3 is balance (ignore it)
+                        # Determine if amount is debit or credit based on description
+                        if description:
+                            desc_upper = description.upper()
+                            credit_keywords = ['DEPOSIT', 'CREDIT', 'PAYMENT RECEIVED', 'REVERSAL', 'DIRECT DEPOSIT']
+                            is_credit = any(keyword in desc_upper for keyword in credit_keywords)
+                            
+                            if is_credit:
+                                credit_amount = amount_columns[0][1]
+                            else:
+                                debit_amount = amount_columns[0][1]
+                        else:
+                            debit_amount = amount_columns[0][1]
+                        # Extract balance from column 3
+                        balance_amount = amount_columns[1][1]
+                    elif col2_idx - col1_idx == 1:
+                        # Consecutive columns
+                        if col1_idx == 2 and col2_idx == 3:
+                            # Columns 2 and 3 - debit and credit
+                            debit_amount = amount_columns[0][1]
+                            credit_amount = amount_columns[1][1]
+                            # Check column 4 for balance
+                            if len(row) > 4:
+                                potential_balance = row[4] if 4 < len(row) else None
+                                if potential_balance and re.match(r'^[\d,]+\.\d{2}$', str(potential_balance).replace(',', '')):
+                                    balance_amount = potential_balance
+                        elif col1_idx == 3 and col2_idx == 4:
+                            # Columns 3 and 4 - first is credit (col 3), second is balance (col 4)
+                            credit_amount = amount_columns[0][1]
+                            balance_amount = amount_columns[1][1]
+                        else:
+                            # Default: first is debit, second is credit
+                            debit_amount = amount_columns[0][1]
+                            credit_amount = amount_columns[1][1]
+                elif len(amount_columns) == 1:
+                    # Only one amount found - determine if it's debit or credit
+                    col_idx, amount = amount_columns[0]
+                    
+                    # For BMO (4 columns), need to determine if amount is debit or credit based on description
+                    if len(row) == 4 and col_idx == 2:
+                        # BMO format - use description keywords to classify
+                        if description:
+                            desc_upper = description.upper()
+                            credit_keywords = ['DEPOSIT', 'CREDIT', 'PAYMENT RECEIVED', 'REVERSAL']
+                            debit_keywords = ['DEBIT CARD', 'CHEQUE', 'PRE-AUTHORIZED PAYMENT', 'WITHDRAWAL', 
+                                             'FEE', 'CHARGE', 'INTERAC', 'E-TRANSFER']
+                            
+                            is_credit = any(keyword in desc_upper for keyword in credit_keywords)
+                            is_debit = any(keyword in desc_upper for keyword in debit_keywords)
+                            
+                            if is_credit:
+                                credit_amount = amount
+                            elif is_debit:
+                                debit_amount = amount
+                            else:
+                                debit_amount = amount
+                        else:
+                            debit_amount = amount
+                        # Extract balance from column 3
+                        if len(row) > 3:
+                            potential_balance = row[3] if 3 < len(row) else None
+                            if potential_balance and re.match(r'^[\d,]+\.\d{2}$', str(potential_balance).replace(',', '')):
+                                balance_amount = potential_balance
+                
+                # If still no amounts found, look for amounts in any column (like old working version)
+                # This handles edge cases - important for BMO to extract all transactions
+                if not debit_amount and not credit_amount:
+                    for i in range(len(row)):
+                        if i >= 2 and row[i] and re.match(r'^[\d,]+\.\d{2}$', str(row[i]).replace(',', '')):
+                            # Determine if this is debit or credit based on description and context
+                            if description:
+                                desc_upper = description.upper()
+                                # Credits (deposits)
+                                if any(keyword in desc_upper for keyword in [
+                                    'FEDERAL PAYMENT', 'LOAN CREDIT', 'REVERSED CHEQUE', 'REVERSED DEBIT',
+                                    'DEPOSIT', 'CREDIT', 'PAYMENT RECEIVED', 'REVERSAL', 'DIRECT DEPOSIT'
+                                ]):
+                                    credit_amount = row[i]
+                                # Debits (withdrawals/fees)
+                                elif any(keyword in desc_upper for keyword in [
+                                    'FEE', 'CHEQUE OVER', 'ACTIVITY FEE', 'MONTHLY FEE', 'TRANSACTION FEE',
+                                    'DEBIT CARD', 'CHEQUE', 'PRE-AUTHORIZED PAYMENT', 'WITHDRAWAL', 
+                                    'CHARGE', 'INTERAC', 'E-TRANSFER'
+                                ]):
+                                    debit_amount = row[i]
+                                else:
+                                    # Default to debit (withdrawal)
+                                    debit_amount = row[i]
+                            else:
+                                # Default to debit if no description
+                                debit_amount = row[i]
+                            break
+            
+            # Convert date to standard format (like old working version)
+            if date:
+                date = self._convert_rbc_date(date)
+            
+            # Extract balance if available (usually the last amount column) - like old working version
+            if not balance_amount and len(row) >= 4:
+                # Look for balance in the last column or second-to-last column
+                for i in range(len(row) - 1, max(2, len(row) - 3), -1):  # Check last few columns
+                    if row[i] and re.match(r'^[\d,]+\.\d{2}$', str(row[i]).replace(',', '')):
+                        # This is likely the balance column
+                        balance_amount = row[i]
+                        break
+            
+            # Return transaction if we have date and at least one amount
+            # Allow transactions without description (like old working version)
+            if date and (debit_amount or credit_amount):
+                result = {
+                    'Date': date,
+                    'Description': description if description else '',
+                    'Withdrawals': debit_amount,
+                    'Deposits': credit_amount
+                }
+                if balance_amount:
+                    result['Balance'] = balance_amount
+                return result
+            
+            return None
+        
+        # For other banks, use header-based extraction if available
         # If we have column headers, use them to identify columns
         if column_headers and len(column_headers) == len(row):
             # Find columns by header names
@@ -2328,7 +2514,15 @@ class BankStatementExtractor:
                     text = page.extract_text()
                     
                     if text:
-                        # PRIORITY 1: CIBC explicit statement period phrasing like "For Nov 1 to Nov 30, 2023"
+                        # PRIORITY 1: BMO format "For the period ending January 31, 2022"
+                        m = re.search(r'For\s+the\s+period\s+ending\s+\w+\s+\d+,\s*(\d{4})', text, re.IGNORECASE)
+                        if m:
+                            year_str = m.group(1)
+                            if 2015 <= int(year_str) <= 2035:
+                                print(f"    📅 Extracted statement year from period ending: {year_str}")
+                                return year_str
+                        
+                        # PRIORITY 2: CIBC explicit statement period phrasing like "For Nov 1 to Nov 30, 2023"
                         # Match "For <Month> <day> to <Month> <day>, <year>"
                         m = re.search(r'For\s+\w+\s+\d+\s+to\s+\w+\s+\d+,\s*(\d{4})', text, re.IGNORECASE)
                         if m:
@@ -2337,7 +2531,7 @@ class BankStatementExtractor:
                                 print(f"    📅 Extracted statement year from period: {year_str}")
                                 return year_str
                         
-                        # PRIORITY 2: Any "for <Month> <day> to <Month> <day>, <year>" (lowercase)
+                        # PRIORITY 3: Any "for <Month> <day> to <Month> <day>, <year>" (lowercase)
                         m = re.search(r'for\s+\w+\s+\d+\s+to\s+\w+\s+\d+,\s*(\d{4})', text, re.IGNORECASE)
                         if m:
                             year_str = m.group(1)
@@ -2345,7 +2539,7 @@ class BankStatementExtractor:
                                 print(f"    📅 Extracted statement year from period: {year_str}")
                                 return year_str
                         
-                        # PRIORITY 3: Opening/Closing balance lines with year
+                        # PRIORITY 4: Opening/Closing balance lines with year
                         m = re.search(r'Opening\s+balance\s+on\s+\w+\s+\d+,\s*(\d{4})', text, re.IGNORECASE)
                         if m:
                             year_str = m.group(1)
@@ -2360,7 +2554,7 @@ class BankStatementExtractor:
                                 print(f"    📅 Extracted statement year from closing balance: {year_str}")
                                 return year_str
                         
-                        # PRIORITY 4: any "to <Month> <day>, <year>"
+                        # PRIORITY 5: any "to <Month> <day>, <year>"
                         m = re.search(r'to\s*\w+\s*\d+,\s*(\d{4})', text, re.IGNORECASE)
                         if m:
                             year_str = m.group(1)

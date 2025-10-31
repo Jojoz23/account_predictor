@@ -217,6 +217,10 @@ class PDFToQuickBooks:
             )
         extracted_with_keys['_match_key'] = _mk_key(extracted_with_keys)
         extracted_running = extracted_with_keys[['_match_key', 'Running_Balance']] if 'Running_Balance' in extracted_with_keys.columns else None
+        # Deduplicate extracted_running to avoid merge expanding rows
+        if extracted_running is not None and extracted_running['_match_key'].duplicated().any():
+            # Keep first occurrence of each _match_key (or use last Running_Balance if that makes more sense)
+            extracted_running = extracted_running.drop_duplicates(subset=['_match_key'], keep='first')
 
         # Convert to standard format (Date, Description, Amount)
         df, was_credit_card = self._convert_to_standard_format(df_extracted, is_credit_card=is_credit_card)
