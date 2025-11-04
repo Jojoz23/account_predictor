@@ -261,43 +261,21 @@ def process_files(uploaded_files, is_credit_card, is_batch_mode):
             try:
                 # Process the PDF
                 with st.spinner(f"Extracting and categorizing {pdf_path.name}..."):
-                    df = pipeline.process_pdf(str(pdf_path), is_credit_card=is_credit_card)
+                    df = pipeline.process_pdf(str(pdf_path), is_credit_card=False)  # Force bank mode for now
                     
                     if df is not None and len(df) > 0:
-                        # Generate output files in memory
+                        # Generate output files in memory using proper save methods
                         excel_buffer = io.BytesIO()
                         iif_buffer = io.StringIO()
                         
-                        # Save to memory buffers
-                        was_credit_card = is_credit_card if is_credit_card is not None else False
-                        
-                        # Save Excel to buffer
-                        with pd.ExcelWriter(excel_buffer, engine='openpyxl') as writer:
-                            display_df = df[['Date', 'Description', 'Amount', 'Account', 'Confidence']].copy()
-                            display_df['Date'] = display_df['Date'].dt.strftime('%Y-%m-%d')
-                            display_df['Confidence'] = display_df['Confidence'].apply(lambda x: f"{x:.1%}")
-                            display_df.to_excel(writer, sheet_name='Categorized Transactions', index=False)
-                        
+                        # Use pipeline's save_to_excel method (creates Debit/Deposit columns)
+                        pipeline.save_to_excel(df, excel_buffer, is_credit_card=False)
                         excel_buffer.seek(0)
                         excel_data = excel_buffer.read()
                         
-                        # Save IIF to buffer (simple format)
-                        iif_lines = []
-                        iif_lines.append("!TRNS\tTRNSID\tTRNSTYPE\tDATE\tACCNT\tNAME\tCLASS\tAMOUNT\tDOCNUM\tMEMO")
-                        iif_lines.append("!SPL\tSPLID\tTRNSTYPE\tDATE\tACCNT\tNAME\tCLASS\tAMOUNT\tDOCNUM\tMEMO")
-                        iif_lines.append("!ENDTRNS")
-                        
-                        for idx_row, row in df.iterrows():
-                            date_str = row['Date'].strftime('%m/%d/%Y')
-                            amount = row['Amount']
-                            description = str(row['Description'])[:100]
-                            account = row['Account']
-                            
-                            iif_lines.append(f"TRNS\t{idx_row}\tDEPOSIT\t{date_str}\tChecking Account\t\t\t{amount}\t\t{description}")
-                            iif_lines.append(f"SPL\t{idx_row}\tDEPOSIT\t{date_str}\t{account}\t\t\t{-amount}\t\t{description}")
-                            iif_lines.append("ENDTRNS")
-                        
-                        iif_data = '\n'.join(iif_lines)
+                        # Use pipeline's save_to_quickbooks_iif method
+                        pipeline.save_to_quickbooks_iif(df, iif_buffer)
+                        iif_data = iif_buffer.getvalue()
                         
                         # Add source file to dataframe for batch mode
                         df['Source_File'] = pdf_path.name
@@ -360,33 +338,7 @@ def process_files(uploaded_files, is_credit_card, is_batch_mode):
                 # Combine all dataframes
                 combined_df = pd.concat([r['dataframe'] for r in all_results], ignore_index=True)
                 
-                # Create combined Excel
-                combined_excel_buffer = io.BytesIO()
-                with pd.ExcelWriter(combined_excel_buffer, engine='openpyxl') as writer:
-                    display_df = combined_df[['Date', 'Description', 'Amount', 'Account', 'Confidence', 'Source_File']].copy()
-                    display_df['Date'] = display_df['Date'].dt.strftime('%Y-%m-%d')
-                    display_df['Confidence'] = display_df['Confidence'].apply(lambda x: f"{x:.1%}")
-                    display_df.to_excel(writer, sheet_name='All Transactions', index=False)
-                combined_excel_buffer.seek(0)
-                combined_excel_data = combined_excel_buffer.read()
-                
-                # Create combined IIF
-                combined_iif_lines = []
-                combined_iif_lines.append("!TRNS\tTRNSID\tTRNSTYPE\tDATE\tACCNT\tNAME\tCLASS\tAMOUNT\tDOCNUM\tMEMO")
-                combined_iif_lines.append("!SPL\tSPLID\tTRNSTYPE\tDATE\tACCNT\tNAME\tCLASS\tAMOUNT\tDOCNUM\tMEMO")
-                combined_iif_lines.append("!ENDTRNS")
-                
-                for idx_row, row in combined_df.iterrows():
-                    date_str = row['Date'].strftime('%m/%d/%Y')
-                    amount = row['Amount']
-                    description = str(row['Description'])[:100]
-                    account = row['Account']
-                    
-                    combined_iif_lines.append(f"TRNS\t{idx_row}\tDEPOSIT\t{date_str}\tChecking Account\t\t\t{amount}\t\t{description}")
-                    combined_iif_lines.append(f"SPL\t{idx_row}\tDEPOSIT\t{date_str}\t{account}\t\t\t{-amount}\t\t{description}")
-                    combined_iif_lines.append("ENDTRNS")
-                
-                combined_iif_data = '\n'.join(combined_iif_lines)
+                # (Combined files created in show_results() function, not here)
                 
 
 def show_results():
@@ -426,6 +378,10 @@ def show_results():
         if 'Date' in df_display.columns:
             df_display['Date'] = pd.to_datetime(df_display['Date']).dt.strftime('%Y-%m-%d')
         
+        # Create Debit and Deposit columns
+        df_display['Withdrawals'] = df_display['Amount'].apply(lambda x: f"${abs(x):,.2f}" if x < 0 else '')
+        df_display['Deposits'] = df_display['Amount'].apply(lambda x: f"${x:,.2f}" if x > 0 else '')
+        
         # Format confidence as percentage
         df_display['Confidence'] = df_display['Confidence'].apply(lambda x: f"{x:.1%}")
         
@@ -442,7 +398,7 @@ def show_results():
         df_display['Confidence Level'] = df_display['Confidence'].apply(get_confidence_indicator)
         
         # Select columns to display (include Source_File for batch mode)
-        display_cols = ['Confidence Level', 'Source_File', 'Date', 'Description', 'Amount', 'Account', 'Confidence']
+        display_cols = ['Confidence Level', 'Source_File', 'Date', 'Description', 'Account', 'Withdrawals', 'Deposits', 'Confidence']
         display_cols = [col for col in display_cols if col in df_display.columns]
         
         # Dataframe with colored confidence indicators
@@ -536,6 +492,10 @@ def show_results():
         if 'Date' in df_display.columns:
             df_display['Date'] = pd.to_datetime(df_display['Date']).dt.strftime('%Y-%m-%d')
         
+        # Create Debit and Deposit columns
+        df_display['Withdrawals'] = df_display['Amount'].apply(lambda x: f"${abs(x):,.2f}" if x < 0 else '')
+        df_display['Deposits'] = df_display['Amount'].apply(lambda x: f"${x:,.2f}" if x > 0 else '')
+        
         # Format confidence as percentage
         df_display['Confidence'] = df_display['Confidence'].apply(lambda x: f"{x:.1%}")
         
@@ -552,7 +512,7 @@ def show_results():
         df_display['Confidence Level'] = df_display['Confidence'].apply(get_confidence_indicator)
         
         # Select columns to display (no Source_File for single mode)
-        display_cols = ['Confidence Level', 'Date', 'Description', 'Amount', 'Account', 'Confidence']
+        display_cols = ['Confidence Level', 'Date', 'Description', 'Account', 'Withdrawals', 'Deposits', 'Confidence']
         display_cols = [col for col in display_cols if col in df_display.columns]
         
         # Dataframe with colored confidence indicators

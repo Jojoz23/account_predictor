@@ -204,12 +204,13 @@ class PDFToQuickBooks:
             return None
         
         # Preserve Running_Balance computed during extraction (if available)
-        extracted_with_keys = df_extracted.copy()
+        extracted_with_keys = df_extracted.copy().reset_index(drop=True)
         extracted_with_keys['Withdrawals'] = pd.to_numeric(extracted_with_keys.get('Withdrawals'), errors='coerce').fillna(0)
         extracted_with_keys['Deposits'] = pd.to_numeric(extracted_with_keys.get('Deposits'), errors='coerce').fillna(0)
-        # Build a robust matching key using original columns
+        # Build a robust matching key using original columns + row index to handle legitimate duplicates
         def _mk_key(df):
             return (
+                df.index.astype(str) + '|' +  # Add row index to make key unique
                 df['Date'].astype(str).str.strip() + '|' +
                 df['Description'].astype(str).str.strip() + '|' +
                 df['Withdrawals'].round(2).astype(str) + '|' +
@@ -217,26 +218,24 @@ class PDFToQuickBooks:
             )
         extracted_with_keys['_match_key'] = _mk_key(extracted_with_keys)
         extracted_running = extracted_with_keys[['_match_key', 'Running_Balance']] if 'Running_Balance' in extracted_with_keys.columns else None
-        # Deduplicate extracted_running to avoid merge expanding rows
-        if extracted_running is not None and extracted_running['_match_key'].duplicated().any():
-            # Keep first occurrence of each _match_key (or use last Running_Balance if that makes more sense)
-            extracted_running = extracted_running.drop_duplicates(subset=['_match_key'], keep='first')
+        # No need to deduplicate since _match_key now includes row index
 
         # Convert to standard format (Date, Description, Amount)
         df, was_credit_card = self._convert_to_standard_format(df_extracted, is_credit_card=is_credit_card)
 
-        # Recreate the same key on the converted frame to merge Running_Balance
-        df['_w'] = df['Amount'].apply(lambda x: -x if x < 0 else 0)
-        df['_d'] = df['Amount'].apply(lambda x: x if x > 0 else 0)
-        df['_match_key'] = (
-            df['Date'].astype(str).str.strip() + '|' +
-            df['Description'].astype(str).str.strip() + '|' +
-            df['_w'].round(2).astype(str) + '|' +
-            df['_d'].round(2).astype(str)
-        )
-        if extracted_running is not None:
+        # Merge Running_Balance only if it doesn't already exist (e.g., from added-back transactions)
+        if 'Running_Balance' not in df.columns and extracted_running is not None:
+            df['_w'] = df['Amount'].apply(lambda x: -x if x < 0 else 0)
+            df['_d'] = df['Amount'].apply(lambda x: x if x > 0 else 0)
+            df['_match_key'] = (
+                df.index.astype(str) + '|' +  # Add row index to match
+                df['Date'].astype(str).str.strip() + '|' +
+                df['Description'].astype(str).str.strip() + '|' +
+                df['_w'].round(2).astype(str) + '|' +
+                df['_d'].round(2).astype(str)
+            )
             df = df.merge(extracted_running, on='_match_key', how='left')
-        df = df.drop(columns=['_w', '_d', '_match_key'], errors='ignore')
+            df = df.drop(columns=['_w', '_d', '_match_key'], errors='ignore')
         
         # Step 2: Predict account categories
         print("\n🧠 STEP 2: Predicting account categories...")
@@ -448,7 +447,7 @@ class PDFToQuickBooks:
         """
         # Clean Date column
         df['Date'] = pd.to_datetime(df['Date'], errors='coerce')
-        df = df[df['Date'].notna()]
+        df = df[df['Date'].notna()].reset_index(drop=True)
         
         was_credit_card = False
         
@@ -462,14 +461,14 @@ class PDFToQuickBooks:
             df['Amount'] = df['Deposits'] - df['Withdrawals']
             
             # Remove rows with zero amounts
-            df = df[df['Amount'] != 0]
+            df = df[df['Amount'] != 0].reset_index(drop=True)
             
             print("  📊 Format: Withdrawals/Deposits columns → Standard Amount")
         
         # CASE 2: Single Amount column (could be credit card or bank)
         elif 'Amount' in df.columns:
             df['Amount'] = pd.to_numeric(df['Amount'], errors='coerce')
-            df = df[df['Amount'].notna()]
+            df = df[df['Amount'].notna()].reset_index(drop=True)
             
             # Auto-detect credit card if not specified
             if is_credit_card is None:
@@ -518,20 +517,22 @@ class PDFToQuickBooks:
         """
         # If Running_Balance is missing, attempt to merge from last extracted frame
         if 'Running_Balance' not in df.columns and hasattr(self, '_last_extracted_df') and isinstance(self._last_extracted_df, pd.DataFrame):
-            src = self._last_extracted_df.copy()
+            src = self._last_extracted_df.copy().reset_index(drop=True)
             if not src.empty:
                 src['Withdrawals'] = pd.to_numeric(src.get('Withdrawals'), errors='coerce').fillna(0)
                 src['Deposits'] = pd.to_numeric(src.get('Deposits'), errors='coerce').fillna(0)
                 src['_match_key'] = (
+                    src.index.astype(str) + '|' +  # Include row index
                     src['Date'].astype(str).str.strip() + '|' +
                     src['Description'].astype(str).str.strip() + '|' +
                     src['Withdrawals'].round(2).astype(str) + '|' +
                     src['Deposits'].round(2).astype(str)
                 )
-                temp = df.copy()
+                temp = df.copy().reset_index(drop=True)
                 temp['_w'] = temp['Amount'].apply(lambda x: -x if x < 0 else 0)
                 temp['_d'] = temp['Amount'].apply(lambda x: x if x > 0 else 0)
                 temp['_match_key'] = (
+                    temp.index.astype(str) + '|' +  # Include row index
                     temp['Date'].astype(str).str.strip() + '|' +
                     temp['Description'].astype(str).str.strip() + '|' +
                     temp['_w'].round(2).astype(str) + '|' +
@@ -539,37 +540,41 @@ class PDFToQuickBooks:
                 )
                 rb_map = src[['_match_key','Running_Balance']] if 'Running_Balance' in src.columns else None
                 if rb_map is not None:
-                    temp = temp.merge(rb_map, on='_match_key', how='left')
-                    df['Running_Balance'] = temp['Running_Balance']
+                    # No need to deduplicate since _match_key includes row index
+                    temp = temp.merge(rb_map, on='_match_key', how='left').reset_index(drop=True)
+                    df['Running_Balance'] = temp['Running_Balance'].values  # Use .values to assign by position, not index
                 df.drop(columns=[c for c in ['_w','_d','_match_key'] if c in df.columns], inplace=True, errors='ignore')
 
         # Harmonize Date with extractor's Date (to preserve correct statement year)
         if hasattr(self, '_last_extracted_df') and isinstance(self._last_extracted_df, pd.DataFrame):
-            srcD = self._last_extracted_df.copy()
+            srcD = self._last_extracted_df.copy().reset_index(drop=True)
             if not srcD.empty:
                 srcD['Withdrawals'] = pd.to_numeric(srcD.get('Withdrawals'), errors='coerce').fillna(0)
                 srcD['Deposits'] = pd.to_numeric(srcD.get('Deposits'), errors='coerce').fillna(0)
                 srcD['_match_key'] = (
+                    srcD.index.astype(str) + '|' +  # Include row index
                     srcD['Date'].astype(str).str.strip() + '|' +
                     srcD['Description'].astype(str).str.strip() + '|' +
                     srcD['Withdrawals'].round(2).astype(str) + '|' +
                     srcD['Deposits'].round(2).astype(str)
                 )
-                tempD = df.copy()
+                tempD = df.copy().reset_index(drop=True)
                 tempD['_w'] = tempD['Amount'].apply(lambda x: -x if x < 0 else 0)
                 tempD['_d'] = tempD['Amount'].apply(lambda x: x if x > 0 else 0)
                 tempD['_match_key'] = (
+                    tempD.index.astype(str) + '|' +  # Include row index
                     tempD['Date'].astype(str).str.strip() + '|' +
                     tempD['Description'].astype(str).str.strip() + '|' +
                     tempD['_w'].round(2).astype(str) + '|' +
                     tempD['_d'].round(2).astype(str)
                 )
                 date_map = srcD[['_match_key','Date']]
-                tempD = tempD.merge(date_map, on='_match_key', how='left', suffixes=('', '_src'))
+                # No need to deduplicate since _match_key includes row index
+                tempD = tempD.merge(date_map, on='_match_key', how='left', suffixes=('', '_src')).reset_index(drop=True)
                 # If a source Date is available, use it
                 if 'Date_src' in tempD.columns:
                     try:
-                        df['Date'] = pd.to_datetime(tempD['Date_src'], errors='coerce')
+                        df['Date'] = pd.to_datetime(tempD['Date_src'], errors='coerce').values  # Use .values to assign by position
                     except Exception:
                         pass
                 df.drop(columns=[c for c in ['_w','_d','_match_key'] if c in df.columns], inplace=True, errors='ignore')
