@@ -17,6 +17,9 @@ from extract_bank_statements import extract_from_pdf, extract_from_folder
 
 warnings.filterwarnings('ignore')
 
+# Suppress TensorFlow info messages
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'  # 0=all, 1=info, 2=warnings, 3=errors
+
 
 class PDFToQuickBooks:
     """
@@ -601,7 +604,8 @@ class PDFToQuickBooks:
             print(f"     Charges will show as positive, payments as negative")
             
             # Format columns
-            display_df['Date'] = display_df['Date'].dt.strftime('%Y-%m-%d')
+            # Keep Date as datetime object so Excel recognizes it as a date (don't convert to string)
+            # display_df['Date'] = display_df['Date'].dt.strftime('%Y-%m-%d')  # Removed - keep as datetime
             display_df['Amount'] = display_df['Amount'].apply(lambda x: f"${x:,.2f}")
             display_df['Running Total'] = display_df['Running Total'].apply(lambda x: f"${x:,.2f}")
             display_df['Confidence'] = display_df['Confidence'].apply(lambda x: f"{x:.1%}")
@@ -626,13 +630,15 @@ class PDFToQuickBooks:
             display_df = display_df[['Date', 'Description', 'Account', 'Debit', 'Deposit', 'Running Total', 'Confidence']]
             
             # Format columns
-            display_df['Date'] = display_df['Date'].dt.strftime('%Y-%m-%d')
+            # Keep Date as datetime object so Excel recognizes it as a date (don't convert to string)
+            # display_df['Date'] = display_df['Date'].dt.strftime('%Y-%m-%d')  # Removed - keep as datetime
             display_df['Confidence'] = display_df['Confidence'].apply(lambda x: f"{x:.1%}")
             
             print(f"  🏦 Bank statement format: Separate Debit and Deposit columns")
         
         # Save to Excel
-        with pd.ExcelWriter(output_path, engine='openpyxl') as writer:
+        # Use date_format parameter to ensure Excel recognizes dates
+        with pd.ExcelWriter(output_path, engine='openpyxl', date_format='YYYY-MM-DD') as writer:
             # Main sheet
             display_df.to_excel(writer, sheet_name='Categorized Transactions', index=False)
             

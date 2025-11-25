@@ -324,6 +324,15 @@ class BankStatementExtractor:
             self.metadata['bank'] = 'BMO'
         elif 'scotiabank' in text_lower or 'bank of nova scotia' in text_lower:
             self.metadata['bank'] = 'Scotiabank'
+        elif 'nova scotia' in text_lower and 'bank' in text_lower:
+            # More specific: "Bank of Nova Scotia" or "Nova Scotia" + "Bank"
+            # Check that it's not just a mention in an address
+            if 'bank of nova scotia' in text_lower or ('registered trademark' in text_lower and 'nova scotia' in text_lower):
+                self.metadata['bank'] = 'Scotiabank'
+        elif 'scotia' in text_lower and ('financial services agreement' in text_lower or 'business banking services agreement' in text_lower or 
+                                         ('registered trademark' in text_lower and 'scotia' in text_lower)):
+            # Scotiabank-specific phrases that won't match other banks
+            self.metadata['bank'] = 'Scotiabank'
         elif 'national bank' in text_lower or 'banque nationale' in text_lower:
             self.metadata['bank'] = 'National Bank'
         
@@ -795,18 +804,37 @@ class BankStatementExtractor:
                 df[col] = df[col].apply(self._clean_amount)
         
         # 5. Remove rows with no amounts
+        # For Scotiabank, keep transactions with Balance even if amounts are missing
+        # (Balance can be used to infer the transaction amount)
+        bank = (self.metadata.get('bank') or '').upper()
         if 'Withdrawals' in df.columns and 'Deposits' in df.columns:
-            df = df[(df['Withdrawals'].notna()) | (df['Deposits'].notna())]
+            before_amount_filter = len(df)
+            if bank == 'SCOTIABANK' and 'Balance' in df.columns:
+                # For Scotiabank, keep transactions that have either amounts OR balance
+                df = df[(df['Withdrawals'].notna()) | (df['Deposits'].notna()) | (df['Balance'].notna())]
+            else:
+                # For other banks, require at least one amount
+                df = df[(df['Withdrawals'].notna()) | (df['Deposits'].notna())]
+            removed_by_amount_filter = before_amount_filter - len(df)
+            if removed_by_amount_filter > 0:
+                print(f"  Removed {removed_by_amount_filter} rows with no amounts (both Withdrawals and Deposits are NaN)")
         
         # 6. Remove duplicates - BUT preserve legitimate multiple transactions with same amounts
         # For bank statements, multiple $200 deposits on same day are DIFFERENT transactions!
         # For RBC statements, use running balance to help with deduplication
         # Only deduplicate transactions that don't have a balance value
-        if self.metadata.get('bank') == 'RBC':
+        bank = (self.metadata.get('bank') or '').upper()
+        if bank == 'RBC':
             # For RBC, only deduplicate transactions without balance values
             # Use running balance to differentiate otherwise identical transactions
             duplicate_subset = ['Date', 'Description', 'Withdrawals', 'Deposits']
             # Don't include Balance - use running balance instead
+        elif bank == 'SCOTIABANK':
+            # For Scotiabank, ALWAYS use Balance column if available for deduplication
+            duplicate_subset = ['Date', 'Description', 'Withdrawals', 'Deposits']
+            if 'Balance' in df.columns:
+                duplicate_subset.append('Balance')
+                print(f"  Scotiabank: Using Balance column for deduplication")
         else:
             # For other banks, use standard deduplication
             duplicate_subset = ['Date', 'Description', 'Withdrawals', 'Deposits']
@@ -1001,6 +1029,11 @@ class BankStatementExtractor:
                     opening_balance = inferred_open
                     closing_balance = float(df.loc[last_idx]['Balance'])
         
+        # SCOTIABANK: Use opening balance from BALANCE FORWARD if available
+        if bank == 'SCOTIABANK' and self.metadata.get('scotiabank_opening_balance_from_bf') is not None:
+            opening_balance = self.metadata.get('scotiabank_opening_balance_from_bf')
+            print(f"    📊 Scotiabank: Using opening balance from BALANCE FORWARD: ${opening_balance:,.2f}")
+        
         # Fallbacks by using Balance column if present (for all banks including RBC)
         if opening_balance is None or closing_balance is None:
             if 'Balance' in df.columns and df['Balance'].notna().any():
@@ -1013,8 +1046,17 @@ class BankStatementExtractor:
                     first_d = float(first_row.get('Deposits', 0)) if pd.notna(first_row.get('Deposits')) else 0
                     first_net = first_d - first_w
                     inferred_open = float(first_row['Balance']) - first_net
-                    opening_balance = inferred_open if opening_balance is None else opening_balance
-                    closing_balance = float(df.loc[last_idx]['Balance']) if closing_balance is None else closing_balance
+                    # For Scotiabank, prefer BALANCE FORWARD over inferred
+                    if bank != 'SCOTIABANK' or opening_balance is None:
+                        opening_balance = inferred_open if opening_balance is None else opening_balance
+                    # For Scotiabank, extract closing balance from last transaction's Balance column
+                    if bank == 'SCOTIABANK' and closing_balance is None:
+                        last_balance = df.loc[last_idx]['Balance']
+                        if pd.notna(last_balance):
+                            closing_balance = float(last_balance)
+                            print(f"    📊 Scotiabank: Extracted closing balance from last transaction: ${closing_balance:,.2f}")
+                    else:
+                        closing_balance = float(df.loc[last_idx]['Balance']) if closing_balance is None else closing_balance
             
         if opening_balance is None or closing_balance is None:
             print("    ⚠️  Could not extract opening/closing balances from PDF")
@@ -1029,10 +1071,11 @@ class BankStatementExtractor:
         
         # Check if we have actual balance values from the statement
         # CIBC and BMO: Ignore Balance column, calculate from opening + flows
+        # SCOTIABANK: Calculate from flows (ignore Balance column for running balance calculation)
         # Other banks: Use Balance column if available, otherwise calculate
         has_balance_column = 'Balance' in df.columns
-        if bank == 'CIBC' or bank == 'BMO':
-            # CIBC and BMO: ignore the per-row Balance column for running steps; compute from opening + flows
+        if bank == 'CIBC' or bank == 'BMO' or bank == 'SCOTIABANK':
+            # CIBC, BMO, and Scotiabank: ignore the per-row Balance column for running steps; compute from opening + flows
             # This ensures consistency and avoids using potentially incorrect balance values
             has_balance_column = False
         
@@ -1383,18 +1426,25 @@ class BankStatementExtractor:
     
     def _extract_opening_closing_balances(self):
         """Extract opening and closing balances from the PDF"""
+        bank = (self.metadata.get('bank') or '').upper()
+        
+        # SCOTIABANK: Use opening balance from BALANCE FORWARD if available
+        # Closing balance will be extracted from last transaction's Balance column in _verify_running_balance
+        if bank == 'SCOTIABANK' and self.metadata.get('scotiabank_opening_balance_from_bf') is not None:
+            opening_balance = self.metadata.get('scotiabank_opening_balance_from_bf')
+            closing_balance = None  # Will be extracted from last transaction's Balance column
+        else:
+            opening_balance = None
+            closing_balance = None
+        
         try:
             with pdfplumber.open(self.pdf_path) as pdf:
-                opening_balance = None
-                closing_balance = None
-                
                 # Check first few pages for balance information
                 for page_num in range(min(3, len(pdf.pages))):
                     page = pdf.pages[page_num]
                     text = page.extract_text()
                     
                     if text:
-                        bank = (self.metadata.get('bank') or '').upper()
                         # Normalize some whitespace and currency formatting noise to help regex
                         norm = text
                         norm = re.sub(r"\s+", " ", norm)
@@ -1661,6 +1711,20 @@ class BankStatementExtractor:
                 sample_text = pdf.pages[0].extract_text() if pdf.pages else ""
             self._detect_bank(sample_text)
         
+        # Ensure bank is detected and normalized
+        if not self.metadata.get('bank'):
+            # Try to detect from PDF text if not already detected
+            import pdfplumber
+            with pdfplumber.open(self.pdf_path) as pdf:
+                sample_text = pdf.pages[0].extract_text() if pdf.pages else ""
+            self._detect_bank(sample_text)
+        
+        # Normalize bank name for Scotiabank
+        bank = (self.metadata.get('bank') or '').upper()
+        if 'scotia' in bank.lower() or 'nova scotia' in bank.lower():
+            self.metadata['bank'] = 'Scotiabank'  # Normalize to 'Scotiabank'
+            print(f"  Bank detected as: Scotiabank")
+        
         camelot_transactions = []
         text_transactions = []
         
@@ -1670,30 +1734,118 @@ class BankStatementExtractor:
             # Step 1: Get Camelot table structure for better parsing
             tables_stream = camelot.read_pdf(self.pdf_path, pages='all', flavor='stream')
             
+            # Fallback bank detection from table structure if not already detected
+            if not self.metadata.get('bank') and tables_stream:
+                # Detect from table structure (Scotiabank has specific header patterns)
+                for i, table in enumerate(tables_stream[:5]):  # Check first 5 tables
+                    df_check = table.df.fillna('')
+                    table_text = ' '.join(df_check.astype(str).values.flatten()).lower()
+                    
+                    # Check for Scotiabank-specific patterns in the table
+                    # Look for "Bank of Nova Scotia" or "Scotiabank" in table content
+                    if 'bank of nova scotia' in table_text or 'scotiabank' in table_text:
+                        self.metadata['bank'] = 'Scotiabank'
+                        print(f"  Bank detected as: Scotiabank (from table content)")
+                        break
+                    
+                    # Check for Scotiabank-specific header patterns
+                    for idx, row in df_check.iterrows():
+                        if idx > 10:  # Check first 10 rows
+                            break
+                        row_text = ' '.join([str(cell) for cell in row.tolist()]).lower()
+                        # Check for Scotiabank-specific header patterns
+                        if (('withdrawals/debits' in row_text or 'deposits/credits' in row_text) and 'balance ($)' in row_text) or \
+                           ('d ate' in row_text and 'description' in row_text and ('withdrawal' in row_text or 'debit' in row_text) and 'balance' in row_text):
+                            self.metadata['bank'] = 'Scotiabank'
+                            print(f"  Bank detected as: Scotiabank (from table structure)")
+                            break
+                    if self.metadata.get('bank') == 'Scotiabank':
+                        break
+            
             if tables_stream:
                 print(f"Camelot found {len(tables_stream)} tables with stream mode")
                 
+                # Re-check bank after table detection (might have been detected from table structure)
+                bank = (self.metadata.get('bank') or '').upper()
+                
                 # Look for transaction tables and extract structure info
                 transaction_table_info = []
-                for i, table in enumerate(tables_stream):
-                    df = table.df
-                    
-                    # Check if this looks like a transaction table
-                    if self._is_transaction_table(df):
-                        print(f"Table {i+1} appears to be a transaction table")
-                        transaction_table_info.append({
-                            'table': df,
-                            'page': getattr(table, 'page', 1) if hasattr(table, 'page') else 1
-                        })
+                
+                # For Scotiabank, use dynamic table detection (scan all tables for transaction headers)
+                # This matches the working debug script logic
+                # Also check if tables have Scotiabank-style headers even if bank not detected yet
+                is_scotiabank_style = False
+                if bank == 'SCOTIABANK':
+                    is_scotiabank_style = True
+                else:
+                    # Check if tables have Scotiabank-style headers (fallback detection)
+                    for i, table in enumerate(tables_stream[:5]):
+                        df_check = table.df.fillna('')
+                        for idx, row in df_check.iterrows():
+                            if idx > 10:
+                                break
+                            row_text = ' '.join([str(cell) for cell in row.tolist()]).lower()
+                            if (('withdrawals/debits' in row_text or 'deposits/credits' in row_text) and 'balance ($)' in row_text) or \
+                               ('d ate' in row_text and 'description' in row_text and ('withdrawal' in row_text or 'debit' in row_text) and 'balance' in row_text):
+                                is_scotiabank_style = True
+                                if not self.metadata.get('bank'):
+                                    self.metadata['bank'] = 'Scotiabank'
+                                    bank = 'SCOTIABANK'
+                                    print(f"  Bank detected as: Scotiabank (from table headers)")
+                                break
+                        if is_scotiabank_style:
+                            break
+                
+                if is_scotiabank_style:
+                    print(f"  Scotiabank: Scanning all {len(tables_stream)} tables for transaction headers...")
+                    for i, table in enumerate(tables_stream):
+                        df = table.df.fillna('')
+                        if len(df) == 0:
+                            continue
+                        
+                        # Check if this table has transaction headers (same logic as debug script)
+                        header_row_idx = None
+                        column_headers = None
+                        for idx, row in df.iterrows():
+                            if idx > 10:  # Only check first 10 rows
+                                break
+                            row_text = ' '.join([str(cell).replace('\n', ' ').replace('\r', ' ') for cell in row.tolist()]).lower()
+                            if ('date' in row_text or 'd ate' in row_text) and 'description' in row_text and ('debit' in row_text or 'withdrawal' in row_text or 'credit' in row_text or 'deposit' in row_text):
+                                header_row_idx = idx
+                                column_headers = [str(cell).replace('\n', ' ').replace('\r', ' ').strip() for cell in row.tolist()]
+                                print(f"  Table {i+1} appears to be a transaction table (Scotiabank) - header at row {header_row_idx}")
+                                transaction_table_info.append({
+                                    'table': df,
+                                    'page': getattr(table, 'page', 1) if hasattr(table, 'page') else 1
+                                })
+                                break
+                else:
+                    # For other banks, use existing logic
+                    for i, table in enumerate(tables_stream):
+                        df = table.df
+                        
+                        # Check if this looks like a transaction table
+                        if self._is_transaction_table(df):
+                            print(f"Table {i+1} appears to be a transaction table")
+                            transaction_table_info.append({
+                                'table': df,
+                                'page': getattr(table, 'page', 1) if hasattr(table, 'page') else 1
+                            })
                 
                 # Step 2: Use Camelot structure to improve text extraction
                 if transaction_table_info:
                     # Extract transactions using Camelot's table structure
                     all_camelot_transactions = []
                     for table_info in transaction_table_info:
-                        table_transactions = self._parse_camelot_transactions(table_info['table'])
-                        if isinstance(table_transactions, pd.DataFrame) and not table_transactions.empty:
-                            all_camelot_transactions.extend(table_transactions.to_dict('records'))
+                        # Use Scotiabank-specific parsing if bank is Scotiabank
+                        if bank == 'SCOTIABANK':
+                            table_transactions = self._parse_camelot_transactions_scotiabank(table_info['table'])
+                            if isinstance(table_transactions, pd.DataFrame) and not table_transactions.empty:
+                                all_camelot_transactions.extend(table_transactions.to_dict('records'))
+                        else:
+                            table_transactions = self._parse_camelot_transactions(table_info['table'])
+                            if isinstance(table_transactions, pd.DataFrame) and not table_transactions.empty:
+                                all_camelot_transactions.extend(table_transactions.to_dict('records'))
                     
                     # Deduplicate Camelot transactions before proceeding
                     if all_camelot_transactions:
@@ -1701,20 +1853,32 @@ class BankStatementExtractor:
                         
                         # For RBC statements, don't deduplicate - keep all transactions
                         # RBC statements can have legitimate duplicate transactions
-                        if self.metadata.get('bank') == 'RBC':
+                        bank = (self.metadata.get('bank') or '').upper()
+                        if bank == 'RBC':
                             print(f"Camelot RBC: Keeping all {len(camelot_df)} transactions (no deduplication)")
                             camelot_transactions = camelot_df.to_dict('records')
-                        else:
-                            # For other banks, be conservative: if Scotiabank, skip dedup entirely
-                            if self.metadata.get('bank') == 'Scotiabank':
-                                print(f"Camelot Scotiabank: Keeping all {len(camelot_df)} transactions (no deduplication)")
-                            else:
-                                # Use deduplication; prefer Balance-aware when available
-                                if 'Balance' in camelot_df.columns:
-                                    camelot_df = camelot_df.drop_duplicates(subset=['Date', 'Description', 'Withdrawals', 'Deposits', 'Balance'])
-                                    print(f"Camelot deduplication: Using Balance column to preserve transactions with different balances")
+                        elif bank == 'SCOTIABANK':
+                            # For Scotiabank, use Balance column for deduplication
+                            if 'Balance' in camelot_df.columns:
+                                before_dedup = len(camelot_df)
+                                camelot_df = camelot_df.drop_duplicates(subset=['Date', 'Description', 'Withdrawals', 'Deposits', 'Balance'])
+                                removed = before_dedup - len(camelot_df)
+                                if removed > 0:
+                                    print(f"Camelot Scotiabank: Removed {removed} duplicates using Balance column")
                                 else:
-                                    camelot_df = camelot_df.drop_duplicates(subset=['Date', 'Description', 'Withdrawals', 'Deposits'])
+                                    print(f"Camelot Scotiabank: No duplicates found (using Balance column for deduplication)")
+                            else:
+                                print(f"Camelot Scotiabank: No Balance column found, using standard deduplication")
+                                camelot_df = camelot_df.drop_duplicates(subset=['Date', 'Description', 'Withdrawals', 'Deposits'])
+                            camelot_transactions = camelot_df.to_dict('records')
+                            print(f"After Camelot deduplication: {len(camelot_transactions)} unique transactions")
+                        else:
+                            # For other banks, use deduplication; prefer Balance-aware when available
+                            if 'Balance' in camelot_df.columns:
+                                camelot_df = camelot_df.drop_duplicates(subset=['Date', 'Description', 'Withdrawals', 'Deposits', 'Balance'])
+                                print(f"Camelot deduplication: Using Balance column to preserve transactions with different balances")
+                            else:
+                                camelot_df = camelot_df.drop_duplicates(subset=['Date', 'Description', 'Withdrawals', 'Deposits'])
                             
                             camelot_transactions = camelot_df.to_dict('records')
                             print(f"After Camelot deduplication: {len(camelot_transactions)} unique transactions")
@@ -1828,8 +1992,220 @@ class BankStatementExtractor:
         
         return sum(indicator in text_content for indicator in transaction_indicators) >= 3
     
+    def _find_column_indices_scotiabank(self, column_headers):
+        """Find column indices for Date, Description, Withdrawals, Deposits, Balance from headers - SCOTIABANK ONLY"""
+        indices = {
+            'date': None,
+            'description': None,
+            'withdrawal': None,
+            'deposit': None,
+            'balance': None
+        }
+        
+        for idx, header in enumerate(column_headers):
+            header_lower = str(header).lower().replace('\n', ' ').replace('\r', ' ')
+            if 'date' in header_lower or 'd ate' in header_lower:
+                indices['date'] = idx
+            elif 'description' in header_lower:
+                indices['description'] = idx
+            elif ('withdrawal' in header_lower or 'debit' in header_lower) and indices['withdrawal'] is None:
+                indices['withdrawal'] = idx
+            elif ('deposit' in header_lower or 'credit' in header_lower) and indices['deposit'] is None:
+                indices['deposit'] = idx
+            elif 'balance' in header_lower:
+                indices['balance'] = idx
+        
+        # Balance is often in the last column if not explicitly found
+        if indices['balance'] is None and len(column_headers) > 0:
+            indices['balance'] = len(column_headers) - 1
+        
+        return indices
+
+    def _parse_camelot_transactions_scotiabank(self, df):
+        """Parse transactions from Camelot-extracted DataFrame - SCOTIABANK SPECIFIC"""
+        transactions = []
+        opening_balance_from_bf = None
+        current_transaction = None
+        pending_description_parts = []
+        
+        # Clean the DataFrame
+        df = df.fillna('')
+        
+        # Find header row dynamically
+        header_row_idx = None
+        column_headers = None
+        for idx, row in df.iterrows():
+            row_text = ' '.join([str(cell).replace('\n', ' ').replace('\r', ' ') for cell in row.tolist()]).lower()
+            if ('date' in row_text or 'd ate' in row_text) and 'description' in row_text and ('debit' in row_text or 'withdrawal' in row_text or 'credit' in row_text or 'deposit' in row_text):
+                header_row_idx = idx
+                column_headers = [str(cell).replace('\n', ' ').replace('\r', ' ').strip() for cell in row.tolist()]
+                break
+        
+        if header_row_idx is None:
+            # No header found, return empty
+            print("  Scotiabank: No header row found in table")
+            return pd.DataFrame()
+        
+        print(f"  Scotiabank: Found header at row {header_row_idx}: {column_headers}")
+        
+        # Find column indices from headers
+        col_indices = self._find_column_indices_scotiabank(column_headers)
+        date_idx = col_indices['date']
+        desc_idx = col_indices['description']
+        withdrawal_idx = col_indices['withdrawal']
+        deposit_idx = col_indices['deposit']
+        balance_idx = col_indices['balance']
+        
+        print(f"  Scotiabank: Column indices - Date: {date_idx}, Desc: {desc_idx}, Withdrawal: {withdrawal_idx}, Deposit: {deposit_idx}, Balance: {balance_idx}")
+        
+        # Process rows after header
+        rows_processed = 0
+        for idx in range(header_row_idx + 1, len(df)):
+            row = df.iloc[idx]
+            row_list = [str(cell).replace('\n', '').replace('\r', '').strip() for cell in row.tolist()]
+            
+            if not any(row_list):
+                continue
+            
+            rows_processed += 1
+            if rows_processed <= 3:  # Debug first 3 rows
+                print(f"  Scotiabank: Processing row {idx}: {row_list[:5]}...")
+            
+            # Check if this is BALANCE FORWARD row (extract opening balance but don't add as transaction)
+            row_text = ' '.join(row_list).upper()
+            if 'BALANCE FORWARD' in row_text:
+                # Extract balance from balance column
+                if balance_idx is not None and balance_idx < len(row_list):
+                    balance_str = row_list[balance_idx]
+                    if balance_str:
+                        # Handle trailing minus (negative balance)
+                        is_negative = balance_str.strip().endswith('-')
+                        balance_clean = balance_str.replace(',', '').replace('-', '').strip()
+                        if re.match(r'^[\d,]+\.?\d{0,2}$', balance_clean):
+                            opening_balance_from_bf = float(balance_clean)
+                            if is_negative:
+                                opening_balance_from_bf = -opening_balance_from_bf
+                continue  # Skip this row, don't add as transaction
+            
+            # Extract date
+            date_match = None
+            if date_idx is not None and date_idx < len(row_list):
+                date_cell = row_list[date_idx]
+                cleaned_date = date_cell.strip()
+                # Remove leading '0 ' or '1 ' followed by space
+                if cleaned_date.startswith('0 ') or cleaned_date.startswith('1 '):
+                    cleaned_date = cleaned_date[2:].strip()
+                # Check for MM/DD/YYYY format
+                if re.match(r'^\d{1,2}/\d{1,2}/\d{4}$', cleaned_date):
+                    date_match = cleaned_date
+            
+            if date_match:
+                # Save previous transaction
+                if current_transaction:
+                    if pending_description_parts:
+                        current_transaction['Description'] = ' '.join(pending_description_parts) + ' ' + current_transaction.get('Description', '')
+                        current_transaction['Description'] = ' '.join(current_transaction['Description'].split())
+                    transactions.append(current_transaction)
+                
+                # Extract new transaction
+                description = row_list[desc_idx] if desc_idx is not None and desc_idx < len(row_list) else ''
+                withdrawal = None
+                deposit = None
+                balance = None
+                
+                # Extract amounts from detected column positions
+                if withdrawal_idx is not None and withdrawal_idx < len(row_list):
+                    withdrawal_str = row_list[withdrawal_idx]
+                    if withdrawal_str and re.match(r'^[\d,]+\.?\d{0,2}$', withdrawal_str.replace(',', '')):
+                        withdrawal = float(withdrawal_str.replace(',', ''))
+                
+                if deposit_idx is not None and deposit_idx < len(row_list):
+                    deposit_str = row_list[deposit_idx]
+                    if deposit_str and re.match(r'^[\d,]+\.?\d{0,2}$', deposit_str.replace(',', '')):
+                        deposit = float(deposit_str.replace(',', ''))
+                
+                # If amounts not found in expected columns, scan all columns (handles empty columns in Table 2)
+                if withdrawal is None and deposit is None:
+                    for col_idx, cell in enumerate(row_list):
+                        if col_idx == date_idx or col_idx == desc_idx or col_idx == balance_idx:
+                            continue  # Skip date, description, and balance columns
+                        cell_clean = str(cell).replace(',', '').strip()
+                        if cell_clean and re.match(r'^[\d,]+\.?\d{0,2}$', cell_clean):
+                            amount = float(cell_clean)
+                            # If we're before the deposit column, it's likely a withdrawal
+                            # If we're after the description, check if it's in withdrawal or deposit range
+                            if withdrawal_idx is not None and col_idx < deposit_idx if deposit_idx is not None else True:
+                                withdrawal = amount
+                            elif deposit_idx is not None and col_idx >= deposit_idx:
+                                deposit = amount
+                            else:
+                                # Default: if no deposit found yet, assume withdrawal
+                                withdrawal = amount
+                            break
+                
+                if balance_idx is not None and balance_idx < len(row_list):
+                    balance_str = row_list[balance_idx]
+                    if balance_str:
+                        # Handle trailing minus (negative balance)
+                        is_negative = balance_str.strip().endswith('-')
+                        balance_clean = balance_str.replace(',', '').replace('-', '').strip()
+                        if re.match(r'^[\d,]+\.?\d{0,2}$', balance_clean):
+                            balance = float(balance_clean)
+                            if is_negative:
+                                balance = -balance
+                
+                # Convert date to YYYY-MM-DD format
+                try:
+                    date_parts = date_match.split('/')
+                    if len(date_parts) == 3:
+                        month, day, year = date_parts
+                        converted_date = f"{year}-{month.zfill(2)}-{day.zfill(2)}"
+                    else:
+                        converted_date = date_match
+                except:
+                    converted_date = date_match
+                
+                current_transaction = {
+                    'Date': converted_date,
+                    'Description': description,
+                    'Withdrawals': withdrawal,
+                    'Deposits': deposit,
+                    'Balance': balance
+                }
+                pending_description_parts = []
+            else:
+                # Continuation row - add to description
+                if current_transaction and desc_idx is not None and desc_idx < len(row_list):
+                    desc_part = row_list[desc_idx]
+                    if desc_part:
+                        pending_description_parts.append(desc_part)
+        
+        # Save last transaction
+        if current_transaction:
+            if pending_description_parts:
+                current_transaction['Description'] = ' '.join(pending_description_parts) + ' ' + current_transaction.get('Description', '')
+                current_transaction['Description'] = ' '.join(current_transaction['Description'].split())
+            transactions.append(current_transaction)
+        
+        # Store opening balance in metadata for later use
+        if opening_balance_from_bf is not None:
+            self.metadata['scotiabank_opening_balance_from_bf'] = opening_balance_from_bf
+        
+        if transactions:
+            return pd.DataFrame(transactions)
+        return pd.DataFrame()
+
     def _parse_camelot_transactions(self, df):
         """Parse transactions from Camelot-extracted DataFrame - SIMPLIFIED APPROACH"""
+        # Check if this is Scotiabank - use specialized parsing
+        bank = (self.metadata.get('bank') or '').upper()
+        # Also check if bank name contains 'scotia' in case it's detected differently
+        if bank == 'SCOTIABANK' or 'scotia' in bank.lower():
+            print(f"  Using Scotiabank-specific parsing (bank detected as: {self.metadata.get('bank')})")
+            return self._parse_camelot_transactions_scotiabank(df)
+        else:
+            print(f"  Using standard parsing (bank detected as: {self.metadata.get('bank')})")
+        
         transactions = []
         current_date = None
         column_headers = None
@@ -1839,7 +2215,6 @@ class BankStatementExtractor:
         
         # Detect column headers from the first few rows
         # For BMO, skip header detection (use simple column-position logic like old working version)
-        bank = (self.metadata.get('bank') or '').upper()
         if bank != 'BMO':
             for idx, row in df.iterrows():
                 if idx > 5:  # Only check first 5 rows for headers
@@ -2506,6 +2881,20 @@ class BankStatementExtractor:
     
     def _extract_statement_year(self):
         """Extract the statement year from the PDF content"""
+        # Try Scotiabank-specific extraction first (even if bank not detected yet)
+        # This works because Scotiabank has a unique table structure
+        try:
+            scotia_year = self._extract_statement_year_scotiabank()
+            if scotia_year and scotia_year != '2023':  # If we got a real year (not default)
+                return scotia_year
+        except:
+            pass  # If Scotiabank extraction fails, fall through to generic extraction
+        
+        # Check if this is Scotiabank - use specialized extraction
+        bank = (self.metadata.get('bank') or '').upper()
+        if bank == 'SCOTIABANK':
+            return self._extract_statement_year_scotiabank()
+        
         try:
             with pdfplumber.open(self.pdf_path) as pdf:
                 # Check first few pages for year information
@@ -2572,6 +2961,68 @@ class BankStatementExtractor:
             print(f"Warning: Could not extract statement year: {e}")
         
         print(f"    ⚠️  Could not extract statement year, defaulting to 2023")
+        return '2023'  # Default fallback
+    
+    def _extract_statement_year_scotiabank(self):
+        """Extract statement year from Scotiabank PDF - SCOTIABANK SPECIFIC"""
+        try:
+            import camelot
+            tables = camelot.read_pdf(self.pdf_path, pages="1", flavor="stream")
+            
+            if tables and len(tables) > 0:
+                table1 = tables[0].df.copy().fillna('')
+                
+                # Find the row with "From:" and "To:" - check row 7 (header) and row 8 (data)
+                # "To:" is usually in row 7, dates are in row 8
+                for idx in range(min(10, len(table1))):
+                    row = table1.iloc[idx]
+                    row_list = [str(cell).replace('\n', ' ').strip() for cell in row.tolist()]
+                    row_text = ' '.join(row_list)
+                    
+                    # Priority 1: Check if this row has "To:" - then check next row for dates
+                    if 'To:' in row_text and idx + 1 < len(table1):
+                        next_row = table1.iloc[idx + 1]
+                        next_row_list = [str(cell).replace('\n', ' ').strip() for cell in next_row.tolist()]
+                        next_row_text = ' '.join(next_row_list)
+                        
+                        # Find all dates in the next row (the "To:" date is the last one)
+                        all_dates = re.findall(r'\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2}\s+(\d{4})\b', next_row_text, re.IGNORECASE)
+                        if all_dates:
+                            year = all_dates[-1][1]  # Last date's year (the "To:" date)
+                            if 2015 <= int(year) <= 2035:
+                                print(f"    📅 Extracted statement year from 'To:' date: {year}")
+                                return year
+                    
+                    # Priority 2: Check if this row has date information
+                    date_matches = [re.search(r'\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2}\s+(\d{4})\b', cell, re.IGNORECASE) for cell in row_list]
+                    if any(date_matches):
+                        all_years = []
+                        for match in date_matches:
+                            if match:
+                                year = match.group(2)
+                                if 2015 <= int(year) <= 2035:
+                                    all_years.append(year)
+                        
+                        if all_years:
+                            # If multiple years, prefer the later one (statement period end)
+                            statement_year = max(all_years)
+                            print(f"    📅 Extracted statement year from dates (preferred latest): {statement_year}")
+                            return statement_year
+                        
+                        # Last fallback: extract any 4-digit year (prefer later year)
+                        year_matches = re.findall(r'\b(\d{4})\b', row_text)
+                        if year_matches:
+                            valid_years = [y for y in year_matches if 2015 <= int(y) <= 2035]
+                            if valid_years:
+                                statement_year = max(valid_years)
+                                print(f"    📅 Extracted statement year (fallback): {statement_year}")
+                                return statement_year
+        except Exception as e:
+            print(f"Warning: Could not extract Scotiabank statement year: {e}")
+            import traceback
+            traceback.print_exc()
+        
+        print(f"    ⚠️  Could not extract Scotiabank statement year, defaulting to 2023")
         return '2023'  # Default fallback
     
     def _convert_rbc_date(self, date_str):
