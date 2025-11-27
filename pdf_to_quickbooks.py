@@ -306,6 +306,7 @@ class PDFToQuickBooks:
         print("="*70)
         
         all_results = []
+        any_credit_card = False  # Track if any file was a credit card
         
         for i, pdf_file in enumerate(pdf_files, 1):
             print(f"\n[{i}/{len(pdf_files)}] {pdf_file.name}")
@@ -324,6 +325,10 @@ class PDFToQuickBooks:
                 
                 # Step 2: Convert to standard format
                 df_converted, was_credit_card = self._convert_to_standard_format(df_extracted, is_credit_card=is_credit_card)
+                
+                # Track if any file was a credit card
+                if was_credit_card:
+                    any_credit_card = True
                 
                 # Step 3: Predict account categories
                 print("\n🧠 Predicting account categories...")
@@ -356,8 +361,16 @@ class PDFToQuickBooks:
         combined_excel = output_folder / "all_transactions_categorized.xlsx"
         combined_qb = output_folder / "all_transactions_quickbooks.iif"
         
-        # For combined file, use bank format (separate Debit/Deposit) since mixing is complex
-        self.save_to_excel(combined_df, combined_excel, is_credit_card=False)
+        # Use credit card format if any file was a credit card (or if explicitly specified)
+        # If is_credit_card was explicitly passed, use it; otherwise use detection result
+        if is_credit_card is not None:
+            combined_is_credit_card = is_credit_card
+        else:
+            combined_is_credit_card = any_credit_card
+        
+        print(f"\n💾 Saving combined results...")
+        print(f"   Format: {'Credit Card (single Amount column)' if combined_is_credit_card else 'Bank Statement (Debit/Deposit columns)'}")
+        self.save_to_excel(combined_df, combined_excel, is_credit_card=combined_is_credit_card)
         self.save_to_quickbooks_iif(combined_df, combined_qb)
         
         print("\n" + "="*70)
@@ -386,6 +399,7 @@ class PDFToQuickBooks:
             'payment - thank you',
             'payment thank you',
             'payment received',
+            'payment from',  # Added for Scotia Visa "PAYMENT FROM - *****"
             'previous balance',
             'new balance',
             'credit card',
@@ -426,11 +440,33 @@ class PDFToQuickBooks:
         if 'Amount' in df.columns:
             positive_desc = df[df['Amount'] > 0]['Description'].str.lower()
             if len(positive_desc) > 0:
-                purchase_keywords = ['purchase', 'pos', 'sale', 'retail', 'restaurant', 'store']
+                # Common merchant/store keywords (credit card transactions often have these)
+                purchase_keywords = ['purchase', 'pos', 'sale', 'retail', 'restaurant', 'store', 
+                                   'depot', 'tire', 'mcdonald', 'shell', 'esso', 'petro', 'subway',
+                                   'walmart', 'wal-mart', 'home depot', 'canadian tire', 'kfc',
+                                   'pizza hut', 'dairy queen', 'bombay', 'vintage', 'patiala']
                 purchase_count = sum(1 for desc in positive_desc for keyword in purchase_keywords if keyword in str(desc))
                 
                 # If >30% of positive amounts are purchases, likely credit card
                 if purchase_count / len(positive_desc) > 0.3:
+                    return True
+                
+                # Also check for merchant patterns (store numbers, merchant IDs)
+                # Credit cards often have patterns like "#1234" or "C12345" in descriptions
+                merchant_patterns = [r'#\d+', r'\b\d{4,}\b', r'[A-Z]\d{4,}', r'C\d+']  # Store numbers, merchant IDs
+                merchant_count = sum(1 for desc in positive_desc 
+                                   if any(re.search(pattern, str(desc)) for pattern in merchant_patterns))
+                if merchant_count / len(positive_desc) > 0.2:  # 20% have merchant patterns
+                    return True
+                
+                # Check for location patterns (city names, provinces) - credit cards often show merchant locations
+                location_patterns = [r'\bON\b', r'\bQC\b', r'\bBC\b', r'\bAB\b', r'\bMB\b', 
+                                    r'\bSK\b', r'\bNS\b', r'\bNB\b', r'\bPE\b', r'\bNL\b',
+                                    r'\bokville', r'\bmississauga', r'\bbrampton', r'\bburlington',
+                                    r'\btoronto', r'\bvancouver', r'\bcalgary', r'\bmontreal']
+                location_count = sum(1 for desc in positive_desc 
+                                   if any(re.search(pattern, str(desc), re.IGNORECASE) for pattern in location_patterns))
+                if location_count / len(positive_desc) > 0.3:  # 30% have location patterns
                     return True
         
         # Default to bank account (safer - won't invert if uncertain)
@@ -585,12 +621,22 @@ class PDFToQuickBooks:
         # Prepare display DataFrame
         # Compute Amount as shown in Excel (respect credit-card inversion)
         amt_display = -df['Amount'] if is_credit_card else df['Amount']
-        # Running total should follow the same sign convention as displayed Amount
-        # If multiple source files are combined, keep separate running totals per source file
-        if 'Source_File' in df.columns:
-            running_total = amt_display.groupby(df['Source_File']).cumsum()
+        
+        # Calculate running total
+        # For credit cards: Use Running_Balance from extractor if available (starts from opening balance)
+        # Otherwise calculate from amounts
+        if is_credit_card and 'Running_Balance' in df.columns:
+            # Use the Running_Balance from extractor (already includes opening balance)
+            # It's in the same format as displayed amounts (charges positive, payments negative)
+            running_total = df['Running_Balance'].copy()
         else:
-            running_total = amt_display.cumsum()
+            # Running total should follow the same sign convention as displayed Amount
+            # If multiple source files are combined, keep separate running totals per source file
+            if 'Source_File' in df.columns:
+                running_total = amt_display.groupby(df['Source_File']).cumsum()
+            else:
+                running_total = amt_display.cumsum()
+        
         if is_credit_card:
             # Credit cards: Keep single Amount column with inverted signs
             display_df = df[[
@@ -599,18 +645,18 @@ class PDFToQuickBooks:
             
             # Invert amounts back to original format for Excel display
             display_df['Amount'] = -display_df['Amount']
-            display_df['Running Total'] = running_total  # already in display sign convention
+            display_df['Running Total'] = running_total  # already in display sign convention (includes opening balance)
             print(f"  💳 Inverting amounts back to credit card format for Excel")
             print(f"     Charges will show as positive, payments as negative")
             
             # Format columns
-            # Keep Date as datetime object so Excel recognizes it as a date (don't convert to string)
-            # display_df['Date'] = display_df['Date'].dt.strftime('%Y-%m-%d')  # Removed - keep as datetime
+            # Format Date to remove time - normalize to midnight (Excel formatting will hide time)
+            display_df['Date'] = pd.to_datetime(display_df['Date']).dt.normalize()
             display_df['Amount'] = display_df['Amount'].apply(lambda x: f"${x:,.2f}")
             display_df['Running Total'] = display_df['Running Total'].apply(lambda x: f"${x:,.2f}")
             display_df['Confidence'] = display_df['Confidence'].apply(lambda x: f"{x:.1%}")
-            # Reorder columns: place Running Total left of Confidence
-            display_df = display_df[['Date', 'Description', 'Amount', 'Running Total', 'Account', 'Confidence']]
+            # Reorder columns: Date, Description, Account, Amount, Running Total, Confidence (Account before Amount like bank statements)
+            display_df = display_df[['Date', 'Description', 'Account', 'Amount', 'Running Total', 'Confidence']]
         else:
             # Bank statements: Split into Debit and Deposit columns
             display_df = df[['Date', 'Description', 'Account', 'Confidence']].copy()
@@ -630,8 +676,8 @@ class PDFToQuickBooks:
             display_df = display_df[['Date', 'Description', 'Account', 'Debit', 'Deposit', 'Running Total', 'Confidence']]
             
             # Format columns
-            # Keep Date as datetime object so Excel recognizes it as a date (don't convert to string)
-            # display_df['Date'] = display_df['Date'].dt.strftime('%Y-%m-%d')  # Removed - keep as datetime
+            # Format Date to remove time - convert to date only (no time component)
+            display_df['Date'] = pd.to_datetime(display_df['Date']).dt.normalize()
             display_df['Confidence'] = display_df['Confidence'].apply(lambda x: f"{x:.1%}")
             
             print(f"  🏦 Bank statement format: Separate Debit and Deposit columns")
@@ -641,6 +687,18 @@ class PDFToQuickBooks:
         with pd.ExcelWriter(output_path, engine='openpyxl', date_format='YYYY-MM-DD') as writer:
             # Main sheet
             display_df.to_excel(writer, sheet_name='Categorized Transactions', index=False)
+            
+            # Format date column to show only date (no time) in Excel
+            worksheet = writer.sheets['Categorized Transactions']
+            # Find the date column index
+            date_col_idx = list(display_df.columns).index('Date') + 1  # +1 because Excel is 1-indexed
+            # Apply date format without time to all date cells
+            from openpyxl.styles import numbers
+            date_format = numbers.FORMAT_DATE_YYYYMMDD2  # Format: YYYY-MM-DD
+            for row in range(2, len(display_df) + 2):  # Start from row 2 (skip header)
+                cell = worksheet.cell(row=row, column=date_col_idx)
+                if cell.value:
+                    cell.number_format = date_format
             
             # Summary sheet - use original df amounts (not display_df which has formatted strings)
             # For credit cards, we need to invert back for accurate summary
