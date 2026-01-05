@@ -69,7 +69,7 @@ class BankStatementExtractor:
         Returns:
         - DataFrame with columns: Date, Description, Withdrawals, Deposits, Balance
         """
-        print(f"🔍 Extracting transactions from: {os.path.basename(self.pdf_path)}")
+        print(f"Extracting transactions from: {os.path.basename(self.pdf_path)}")
         print("="*70)
         
         if strategy == 'auto':
@@ -332,8 +332,15 @@ class BankStatementExtractor:
             self.metadata['bank'] = 'CIBC'
         elif 'royal bank' in text_lower or 'rbc' in text_lower:
             self.metadata['bank'] = 'RBC'
-        elif 'td bank' in text_lower or 'toronto-dominion' in text_lower:
+        elif 'td bank' in text_lower or 'toronto-dominion' in text_lower or 'td canada trust' in text_lower:
             self.metadata['bank'] = 'TD'
+        elif 'td' in text_lower and 'visa' in text_lower:
+            # TD Visa credit card (text may have spaces removed, e.g., "TDBUSINESSSELECTRATEVISA")
+            # Check for TD-specific patterns to avoid false positives (e.g., "TD" in merchant names)
+            if 'td business' in text_lower or 'tdbusiness' in text_lower or 'select rate' in text_lower or 'selectrate' in text_lower:
+                self.metadata['bank'] = 'TD'
+            elif 'td canada trust' in text_lower or 'tdcanadatrust' in text_lower:
+                self.metadata['bank'] = 'TD'
         elif 'bank of montreal' in text_lower or 'bmo' in text_lower:
             self.metadata['bank'] = 'BMO'
         elif 'scotiabank' in text_lower or 'bank of nova scotia' in text_lower:
@@ -751,20 +758,31 @@ class BankStatementExtractor:
         # Rename columns
         df = df.rename(columns=col_mapping)
         
-        # If we have Amount but not Withdrawals/Deposits, split it
-        if 'Amount' in df.columns and 'Withdrawals' not in df.columns and 'Deposits' not in df.columns:
+        # Check if this is a credit card statement
+        is_credit_card = self.metadata.get('is_credit_card', False)
+        bank = (self.metadata.get('bank') or '').upper()
+        
+        # For credit cards, keep Amount column (don't split into Withdrawals/Deposits)
+        if is_credit_card and (bank == 'TD' or bank == 'SCOTIABANK'):
+            # Keep Amount column for credit cards
+            standard_cols = ['Date', 'Description', 'Amount']
+            if 'Balance' in df.columns:
+                standard_cols.append('Balance')
+        # If we have Amount but not Withdrawals/Deposits, split it (for bank accounts)
+        elif 'Amount' in df.columns and 'Withdrawals' not in df.columns and 'Deposits' not in df.columns:
             df['Amount_Clean'] = df['Amount'].astype(str).str.replace('$', '').str.replace(',', '').str.strip()
             df['Withdrawals'] = df['Amount_Clean'].apply(lambda x: x if x and ('-' in str(x) or '(' in str(x)) else None)
             df['Deposits'] = df['Amount_Clean'].apply(lambda x: x if x and '-' not in str(x) and '(' not in str(x) and x != 'None' else None)
             df = df.drop(['Amount', 'Amount_Clean'], axis=1)
-        
-        # Keep standard columns
-        # For RBC, preserve Balance column as it's reliable from Camelot extraction
-        # For other banks, preserve Balance if available (they might use it)
-        standard_cols = ['Date', 'Description', 'Withdrawals', 'Deposits']
+            standard_cols = ['Date', 'Description', 'Withdrawals', 'Deposits']
+        else:
+            # Keep standard columns
+            # For RBC, preserve Balance column as it's reliable from Camelot extraction
+            # For other banks, preserve Balance if available (they might use it)
+            standard_cols = ['Date', 'Description', 'Withdrawals', 'Deposits']
         
         # Preserve Balance column if it exists (especially important for RBC)
-        if 'Balance' in df.columns:
+        if 'Balance' in df.columns and 'Balance' not in standard_cols:
             standard_cols.append('Balance')
         
         available_cols = [c for c in standard_cols if c in df.columns]
@@ -817,7 +835,7 @@ class BankStatementExtractor:
         bank = (self.metadata.get('bank') or '').upper()
         
         # For credit cards, clean Amount column; for bank accounts, clean Withdrawals/Deposits
-        if is_credit_card and bank == 'SCOTIABANK':
+        if is_credit_card and (bank == 'SCOTIABANK' or bank == 'TD'):
             if 'Amount' in df.columns:
                 df['Amount'] = df['Amount'].apply(self._clean_amount)
         else:
@@ -827,7 +845,7 @@ class BankStatementExtractor:
         
         # 5. Remove rows with no amounts
         # For credit cards, require Amount column
-        if is_credit_card and bank == 'SCOTIABANK':
+        if is_credit_card and (bank == 'SCOTIABANK' or bank == 'TD'):
             if 'Amount' in df.columns:
                 before_amount_filter = len(df)
                 df = df[df['Amount'].notna()]
@@ -853,8 +871,14 @@ class BankStatementExtractor:
         # For credit cards, use Amount column for deduplication
         # For RBC statements, use running balance to help with deduplication
         # Only deduplicate transactions that don't have a balance value
-        if is_credit_card and bank == 'SCOTIABANK':
-            # For credit cards, use Amount column for deduplication
+        if is_credit_card and bank == 'TD':
+            # For TD Visa credit cards, don't deduplicate - preserve all transactions
+            # Multiple transactions with same date/description/amount are legitimate (e.g., multiple $200 charges)
+            print(f"  TD Visa: Preserving all transactions (no deduplication - legitimate duplicates may exist)")
+            # Skip deduplication for TD Visa
+            duplicate_subset = None
+        elif is_credit_card and bank == 'SCOTIABANK':
+            # For Scotia Visa credit cards, use Amount column for deduplication
             duplicate_subset = ['Date', 'Description', 'Amount']
             print(f"  Scotia Visa: Using Amount column for deduplication")
         elif bank == 'RBC':
@@ -875,24 +899,29 @@ class BankStatementExtractor:
                 duplicate_subset.append('Balance')
         
         before_dedup = len(df)
-        df_deduped = df.drop_duplicates(subset=duplicate_subset)
-        removed_by_dedup = before_dedup - len(df_deduped)
-        
-        # Use standard deduplication for all banks
-        if removed_by_dedup >= 5:
-            # Only deduplicate if 5+ transactions would be removed
-            # Store removed transactions for analysis
-            removed_transactions = df[~df.index.isin(df_deduped.index)]
-            df = df_deduped
-            print(f"  Removed {removed_by_dedup} duplicate transactions (5+ duplicates found)")
-            
-            # Store removed transactions for dynamic programming analysis
-            self.removed_transactions = removed_transactions
-        else:
-            # Keep all transactions if fewer than 5 duplicates
-            print(f"  Found {removed_by_dedup} potential duplicates - keeping all (likely legitimate repeated transactions)")
-            # Don't deduplicate - keep original df
+        if duplicate_subset is None:
+            # Skip deduplication (for TD Visa)
+            print(f"  Skipping deduplication - preserving all {before_dedup} transactions")
             self.removed_transactions = None
+        else:
+            df_deduped = df.drop_duplicates(subset=duplicate_subset)
+            removed_by_dedup = before_dedup - len(df_deduped)
+            
+            # Use standard deduplication for all banks
+            if removed_by_dedup >= 5:
+                # Only deduplicate if 5+ transactions would be removed
+                # Store removed transactions for analysis
+                removed_transactions = df[~df.index.isin(df_deduped.index)]
+                df = df_deduped
+                print(f"  Removed {removed_by_dedup} duplicate transactions (5+ duplicates found)")
+                
+                # Store removed transactions for dynamic programming analysis
+                self.removed_transactions = removed_transactions
+            else:
+                # Keep all transactions if fewer than 5 duplicates
+                print(f"  Found {removed_by_dedup} potential duplicates - keeping all (likely legitimate repeated transactions)")
+                # Don't deduplicate - keep original df
+                self.removed_transactions = None
         
         # 6b. Extra-conservative pass for RBC: remove only adjacent exact duplicates
         # This catches page-repeat artifacts while preserving legitimate repeated transactions
@@ -1047,6 +1076,34 @@ class BankStatementExtractor:
         
         bank = (self.metadata.get('bank') or '').upper()
         is_credit_card = self.metadata.get('is_credit_card', False)
+        
+        # TD VISA: Calculate running balance from opening + Amount column
+        if is_credit_card and bank == 'TD':
+            if opening_balance is not None:
+                print(f"    TD Visa: Using opening balance: ${opening_balance:,.2f}")
+                if 'Amount' in df.columns:
+                    df['Running_Balance'] = opening_balance + df['Amount'].cumsum()
+                    
+                    # Verify against closing balance
+                    if closing_balance is not None:
+                        final_running = df['Running_Balance'].iloc[-1]
+                        difference = abs(final_running - closing_balance)
+                        if difference < 0.01:
+                            print(f"    ✅ TD Visa: Running balance matches closing balance (${final_running:,.2f})")
+                        else:
+                            print(f"    ⚠️  TD Visa: Running balance mismatch - Calculated: ${final_running:,.2f}, Statement: ${closing_balance:,.2f}, Difference: ${difference:,.2f}")
+                else:
+                    print(f"    ⚠️  TD Visa: No Amount column found, cannot calculate running balance")
+            else:
+                print(f"    ⚠️  TD Visa: No opening balance found, cannot calculate running balance")
+            
+            # Store balances in metadata
+            if opening_balance is not None:
+                self.metadata['opening_balance'] = opening_balance
+            if closing_balance is not None:
+                self.metadata['closing_balance'] = closing_balance
+            
+            return df
         
         # SCOTIA VISA: Calculate running balance from opening + Amount column
         if is_credit_card and bank == 'SCOTIABANK':
@@ -1491,6 +1548,52 @@ class BankStatementExtractor:
         bank = (self.metadata.get('bank') or '').upper()
         is_credit_card = self.metadata.get('is_credit_card', False)
         
+        # TD VISA: Extract from tables using Camelot
+        if is_credit_card and bank == 'TD':
+            try:
+                import camelot
+                all_tables = camelot.read_pdf(self.pdf_path, pages="all", flavor="stream")
+                opening_balance = None
+                closing_balance = None
+                
+                for table_idx, table in enumerate(all_tables):
+                    df = table.df.fillna('')
+                    for idx in range(len(df)):
+                        row = df.iloc[idx]
+                        row_text = ' '.join([str(cell) for cell in row.tolist()])
+                        row_text_upper = row_text.upper()
+                        
+                        # Look for "PREVIOUS STATEMENT BALANCE" - opening balance
+                        if 'PREVIOUS STATEMENT BALANCE' in row_text_upper and opening_balance is None:
+                            amount_match = re.search(r'\$?([\d,]+\.?\d{0,2})', row_text)
+                            if amount_match:
+                                try:
+                                    opening_balance = float(amount_match.group(1).replace(',', ''))
+                                    print(f"    TD Visa: Found opening balance: ${opening_balance:,.2f}")
+                                except:
+                                    pass
+                        
+                        # Look for "TOTAL NEW BALANCE" or "NEW BALANCE" - closing balance
+                        closing_patterns = [
+                            r'TOTAL\s+NEW\s+BALANCE[:\s]+\$?([\d,]+\.?\d{0,2})',
+                            r'NEW\s+BALANCE[:\s]+\$?([\d,]+\.?\d{0,2})',
+                        ]
+                        if closing_balance is None:
+                            for pattern in closing_patterns:
+                                match = re.search(pattern, row_text_upper)
+                                if match:
+                                    try:
+                                        closing_balance = float(match.group(1).replace(',', ''))
+                                        print(f"    TD Visa: Found closing balance: ${closing_balance:,.2f}")
+                                        break
+                                    except:
+                                        pass
+                
+                if opening_balance is not None or closing_balance is not None:
+                    return opening_balance, closing_balance
+            except Exception as e:
+                print(f"Warning: Could not extract TD Visa balances from tables: {e}")
+        
         # SCOTIA VISA: Extract from Table 1 using Camelot
         if is_credit_card and bank == 'SCOTIABANK':
             try:
@@ -1821,6 +1924,16 @@ class BankStatementExtractor:
             with pdfplumber.open(self.pdf_path) as pdf:
                 sample_text = pdf.pages[0].extract_text() if pdf.pages else ""
             self._detect_bank(sample_text)
+            
+            # If still not detected and it's a credit card, try credit card-specific detection
+            if not self.metadata.get('bank') and self.metadata.get('is_credit_card'):
+                sample_text_lower = sample_text.lower()
+                # For TD Visa, check for TD-specific patterns (not just "td" and "visa")
+                if ('td business' in sample_text_lower or 'tdbusiness' in sample_text_lower or 
+                    'select rate' in sample_text_lower or 'selectrate' in sample_text_lower or
+                    'td canada trust' in sample_text_lower or 'tdcanadatrust' in sample_text_lower) and 'visa' in sample_text_lower:
+                    self.metadata['bank'] = 'TD'
+                    print(f"  Bank detected as: TD (from credit card pattern)")
         
         # Normalize bank name for Scotiabank
         bank = (self.metadata.get('bank') or '').upper()
@@ -1876,6 +1989,29 @@ class BankStatementExtractor:
                 
                 # Look for transaction tables and extract structure info
                 transaction_table_info = []
+                
+                # For TD Visa credit cards, look for credit card transaction tables
+                if is_credit_card and bank == 'TD':
+                    print(f"  TD Visa: Scanning all {len(tables_stream)} tables for credit card transaction headers...")
+                    for i, table in enumerate(tables_stream):
+                        df = table.df.fillna('')
+                        if len(df) == 0:
+                            continue
+                        
+                        # Check if this table has credit card transaction headers
+                        # TD Visa has "DATE DATE ACTIVITY DESCRIPTION AMOUNT($)" or combined format
+                        for idx, row in df.iterrows():
+                            if idx > 20:  # Check more rows (TD Visa headers might be later)
+                                break
+                            row_text = ' '.join([str(cell).replace('\n', ' ').replace('\r', ' ') for cell in row.tolist()]).upper()
+                            # Look for "DATE" and "AMOUNT" headers (TD Visa format)
+                            if 'DATE' in row_text and 'AMOUNT' in row_text and ('DESCRIPTION' in row_text or 'ACTIVITY' in row_text):
+                                print(f"  Table {i+1} appears to be a credit card transaction table (TD Visa) - header at row {idx}")
+                                transaction_table_info.append({
+                                    'table': df,
+                                    'page': getattr(table, 'page', 1) if hasattr(table, 'page') else 1
+                                })
+                                break
                 
                 # For Scotia Visa credit cards, look for credit card transaction tables
                 if is_credit_card and bank == 'SCOTIABANK':
@@ -1965,8 +2101,13 @@ class BankStatementExtractor:
                     # Extract transactions using Camelot's table structure
                     all_camelot_transactions = []
                     for table_info in transaction_table_info:
+                        # Use TD Visa-specific parsing if credit card
+                        if is_credit_card and bank == 'TD':
+                            table_transactions = self._parse_camelot_transactions_td_visa(table_info['table'])
+                            if isinstance(table_transactions, pd.DataFrame) and not table_transactions.empty:
+                                all_camelot_transactions.extend(table_transactions.to_dict('records'))
                         # Use Scotia Visa-specific parsing if credit card
-                        if is_credit_card and bank == 'SCOTIABANK':
+                        elif is_credit_card and bank == 'SCOTIABANK':
                             table_transactions = self._parse_camelot_transactions_scotia_visa(table_info['table'])
                             if isinstance(table_transactions, pd.DataFrame) and not table_transactions.empty:
                                 all_camelot_transactions.extend(table_transactions.to_dict('records'))
@@ -1992,6 +2133,15 @@ class BankStatementExtractor:
                         if bank == 'RBC':
                             print(f"Camelot RBC: Keeping all {len(camelot_df)} transactions (no deduplication)")
                             camelot_transactions = camelot_df.to_dict('records')
+                        elif is_credit_card and bank == 'TD':
+                            # For TD Visa credit cards, don't deduplicate - preserve all transactions
+                            # Multiple transactions with same date/description/amount are legitimate (e.g., multiple $200 charges at same merchant)
+                            # Remove _row_index column if it exists (it was only for tracking)
+                            if '_row_index' in camelot_df.columns:
+                                camelot_df = camelot_df.drop(columns=['_row_index'])
+                            print(f"Camelot TD Visa: Keeping all {len(camelot_df)} transactions (no deduplication - preserving legitimate duplicates)")
+                            camelot_transactions = camelot_df.to_dict('records')
+                            print(f"After Camelot processing: {len(camelot_transactions)} transactions")
                         elif is_credit_card and bank == 'SCOTIABANK':
                             # For Scotia Visa credit cards, use Amount column for deduplication
                             if 'Amount' in camelot_df.columns:
@@ -2470,6 +2620,170 @@ class BankStatementExtractor:
                 'Date': date_str,
                 'Description': description,
                 'Amount': amount
+            })
+        
+        if transactions:
+            return pd.DataFrame(transactions)
+        return pd.DataFrame()
+    
+    def _parse_camelot_transactions_td_visa(self, df):
+        """Parse transactions from Camelot-extracted DataFrame - TD VISA CREDIT CARD SPECIFIC"""
+        transactions = []
+        df = df.fillna('')
+        
+        month_map = {
+            'jan': 1, 'feb': 2, 'mar': 3, 'apr': 4, 'may': 5, 'jun': 6,
+            'jul': 7, 'aug': 8, 'sep': 9, 'oct': 10, 'nov': 11, 'dec': 12
+        }
+        
+        # Get statement years for date conversion
+        statement_start_year = int(self.metadata.get('statement_start_year', self.metadata.get('statement_year', '2024')))
+        statement_end_year = int(self.metadata.get('statement_end_year', self.metadata.get('statement_year', '2024')))
+        
+        # Find header row and column indices
+        header_found = False
+        date_col = None
+        desc_col = None
+        amount_col = None
+        
+        # Check more rows for headers (TD Visa continuation pages might have headers later)
+        for idx in range(min(20, len(df))):
+            row = df.iloc[idx]
+            row_text = ' '.join([str(cell).upper() for cell in row.tolist()])
+            
+            # Check for transaction table headers
+            # TD Visa format 1: "DATE DATE ACTIVITY DESCRIPTION AMOUNT($)" (separate columns)
+            # TD Visa format 2: "DATE\nDATE\nACTIVITY DESCRIPTION" in one column, "AMOUNT($)" in another
+            if 'DATE' in row_text and ('DESCRIPTION' in row_text or 'MERCHANT' in row_text or 'DETAILS' in row_text or 'ACTIVITY' in row_text) and 'AMOUNT' in row_text:
+                header_found = True
+                
+                # Check if this is the combined format (dates and description in one cell)
+                is_combined_format = False
+                for col_idx, cell in enumerate(row):
+                    cell_str = str(cell)
+                    if '\n' in cell_str and 'DATE' in cell_str.upper() and ('DESCRIPTION' in cell_str.upper() or 'ACTIVITY' in cell_str.upper()):
+                        is_combined_format = True
+                        date_col = col_idx
+                        desc_col = col_idx
+                        break
+                
+                if not is_combined_format:
+                    # Find column indices for separate columns format
+                    for col_idx, cell in enumerate(row):
+                        cell_upper = str(cell).upper()
+                        if 'DATE' in cell_upper and date_col is None:
+                            date_col = col_idx  # Use first DATE column (transaction date)
+                        if ('DESCRIPTION' in cell_upper or 'MERCHANT' in cell_upper or 'DETAILS' in cell_upper or 'ACTIVITY' in cell_upper) and desc_col is None:
+                            desc_col = col_idx
+                        if 'AMOUNT' in cell_upper and amount_col is None:
+                            amount_col = col_idx
+                
+                # Find amount column if not already found
+                if amount_col is None:
+                    for col_idx, cell in enumerate(row):
+                        cell_upper = str(cell).upper()
+                        if 'AMOUNT' in cell_upper:
+                            amount_col = col_idx
+                            break
+                
+                break
+        
+        if not header_found or date_col is None or desc_col is None or amount_col is None:
+            return pd.DataFrame()
+        
+        # Extract transactions
+        start_row = idx + 1
+        is_combined_format = (date_col == desc_col)
+        
+        for row_idx in range(start_row, len(df)):
+            row = df.iloc[row_idx]
+            
+            if is_combined_format:
+                # Combined format: "MERCHANT NAME\nOCT 7\nOCT 8" in one cell
+                combined_cell = str(row.iloc[date_col]).strip()
+                if not combined_cell or combined_cell == 'nan':
+                    continue
+                
+                # Split by newlines
+                parts = [p.strip() for p in combined_cell.split('\n') if p.strip()]
+                if len(parts) < 2:
+                    continue
+                
+                # First part is description, second is transaction date
+                desc_str = parts[0]
+                date_str = parts[1] if len(parts) > 1 else ''
+            else:
+                # Separate columns format
+                date_str = str(row.iloc[date_col]).strip()
+                desc_str = str(row.iloc[desc_col]).strip()
+            
+            amount_str = str(row.iloc[amount_col]).strip()
+            
+            # Skip empty rows
+            if not date_str or date_str == 'nan':
+                continue
+            
+            # Skip balance rows
+            row_text_upper = ' '.join([str(cell).upper() for cell in row.tolist()])
+            desc_upper = str(row.iloc[desc_col]).upper() if desc_col is not None and desc_col < len(row) else ''
+            
+            # Check if this row has a valid date first
+            date_match_check = re.match(r'(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\.?\s+(\d{1,2})', date_str, re.IGNORECASE)
+            
+            # Only skip balance rows if they don't have a valid transaction date
+            if 'PREVIOUS' in desc_upper and 'BALANCE' in desc_upper and not date_match_check:
+                continue
+            if 'TOTAL' in desc_upper and 'NEW BALANCE' in desc_upper and not date_match_check:
+                continue
+            if 'CALCULATING' in row_text_upper and 'BALANCE' in row_text_upper and not date_match_check:
+                continue
+            
+            # Parse date
+            date_match = re.match(r'(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\.?\s+(\d{1,2})', date_str, re.IGNORECASE)
+            if not date_match:
+                continue
+            
+            month_name = date_match.group(1).lower()
+            day = int(date_match.group(2))
+            month = month_map.get(month_name, 1)
+            
+            # Determine year
+            if statement_start_year != statement_end_year:
+                if month <= 5:
+                    year_to_use = statement_end_year
+                else:
+                    year_to_use = statement_start_year
+            else:
+                year_to_use = statement_start_year
+            
+            try:
+                full_date = datetime(year_to_use, month, day)
+                date_str_formatted = full_date.strftime('%Y-%m-%d')
+            except:
+                continue
+            
+            # Parse amount
+            amount_clean = amount_str.replace(',', '').replace('$', '').strip()
+            is_negative = amount_str.strip().startswith('-') or amount_clean.startswith('-')
+            amount_clean = amount_clean.replace('-', '').strip()
+            
+            # Extract just the number part (might be attached to text)
+            amount_match = re.search(r'([\d,]+\.?\d{0,2})', amount_clean)
+            if not amount_match:
+                continue
+            
+            try:
+                amount = float(amount_match.group(1).replace(',', ''))
+                if is_negative:
+                    amount = -amount
+            except:
+                continue
+            
+            transactions.append({
+                'Date': date_str_formatted,
+                'Description': desc_str,
+                'Amount': amount,
+                '_row_index': row_idx  # Add row index to differentiate legitimate duplicate transactions
             })
         
         if transactions:
@@ -3165,6 +3479,14 @@ class BankStatementExtractor:
         # Check if this is a credit card statement - use specialized extraction
         # Try even if bank not detected yet (credit card detection happens first)
         if self.metadata.get('is_credit_card'):
+            # Try TD Visa extraction first (works even if bank not detected yet)
+            try:
+                td_visa_year = self._extract_statement_year_td_visa()
+                if td_visa_year and td_visa_year != '2024':  # If we got a real year (not default)
+                    return td_visa_year
+            except:
+                pass  # If extraction fails, fall through to other methods
+            
             # Try Scotia Visa extraction (works even if bank not detected yet)
             try:
                 scotia_visa_year = self._extract_statement_year_scotia_visa()
@@ -3252,7 +3574,7 @@ class BankStatementExtractor:
         except Exception as e:
             print(f"Warning: Could not extract statement year: {e}")
         
-        print(f"    ⚠️  Could not extract statement year, defaulting to 2023")
+        print(f"    WARNING: Could not extract statement year, defaulting to 2023")
         return '2023'  # Default fallback
     
     def _extract_statement_year_scotiabank(self):
@@ -3318,7 +3640,7 @@ class BankStatementExtractor:
         return '2023'  # Default fallback
     
     def _detect_credit_card_statement(self, text):
-        """Detect if this is a credit card statement - SCOTIA VISA SPECIFIC"""
+        """Detect if this is a credit card statement - SCOTIA VISA and TD VISA"""
         text_lower = text.lower()
         
         # Check for Scotia Visa credit card indicators
@@ -3329,6 +3651,29 @@ class BankStatementExtractor:
                     return True
                 # Check for credit card statement structure
                 if 'ref.#' in text_lower and 'amount($)' in text_lower:
+                    return True
+        
+        # Check for TD Visa credit card indicators
+        # TD Visa statements have "TD BUSINESS SELECT RATE VISA" or similar patterns
+        # Text extraction may remove spaces, so check for "td" and "visa" together
+        # But be more specific to avoid false positives (e.g., "TD" in merchant names in Scotia Visa)
+        if 'td' in text_lower and 'visa' in text_lower:
+            # Check for TD-specific patterns first
+            if 'td business' in text_lower or 'tdbusiness' in text_lower or 'select rate' in text_lower or 'selectrate' in text_lower:
+                # If we see TD business/select rate with visa, it's likely TD Visa
+                # Additional check: look for credit card-specific terms
+                if 'previous balance' in text_lower or 'new balance' in text_lower or 'previous statement balance' in text_lower:
+                    return True
+                # Check for TD Visa statement structure (spaces may be removed)
+                if 'statementperiod' in text_lower or 'statement period' in text_lower:
+                    return True
+                if 'activitydescription' in text_lower or 'activity description' in text_lower:
+                    return True
+                # If we have TD business/select rate + visa, it's very likely TD Visa
+                return True
+            elif 'td canada trust' in text_lower or 'tdcanadatrust' in text_lower:
+                # Additional check: look for credit card-specific terms
+                if 'previous balance' in text_lower or 'new balance' in text_lower or 'previous statement balance' in text_lower:
                     return True
         
         return False
@@ -3392,6 +3737,72 @@ class BankStatementExtractor:
             traceback.print_exc()
         
         print(f"    Warning: Could not extract Scotia Visa statement year, defaulting to 2024")
+        # Set defaults
+        self.metadata['statement_start_year'] = '2024'
+        self.metadata['statement_end_year'] = '2024'
+        return '2024'  # Default fallback
+    
+    def _extract_statement_year_td_visa(self):
+        """Extract statement year from TD Visa credit card statement - TD VISA SPECIFIC"""
+        try:
+            import camelot
+            tables = camelot.read_pdf(self.pdf_path, pages="1", flavor="stream")
+            
+            statement_start_year = None
+            statement_end_year = None
+            
+            if tables and len(tables) > 0:
+                # Look for statement period in all tables (TD Visa has it in Table 1)
+                for table_idx, table in enumerate(tables):
+                    df = table.df.fillna('')
+                    for idx in range(len(df)):
+                        row = df.iloc[idx]
+                        row_text = ' '.join([str(cell) for cell in row.tolist()])
+                        
+                        # Pattern: "STATEMENT PERIOD: May 06, 2025 to June 05, 2025"
+                        # Try simpler pattern that matches the date range directly
+                        period_match = re.search(r'(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2},\s+(\d{4})\s+to\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2},\s+(\d{4})', row_text, re.IGNORECASE)
+                        # Only accept if "STATEMENT PERIOD" appears in the row
+                        if period_match and 'STATEMENT PERIOD' in row_text.upper():
+                            statement_period = period_match.group(0)
+                            statement_start_year = period_match.group(2)
+                            statement_end_year = period_match.group(4)
+                            
+                            # Store both years for year transition handling
+                            self.metadata['statement_start_year'] = statement_start_year
+                            self.metadata['statement_end_year'] = statement_end_year
+                            self.metadata['statement_period'] = statement_period
+                            
+                            print(f"    Extracted TD Visa statement period: {statement_period}")
+                            print(f"    Start year: {statement_start_year}, End year: {statement_end_year}")
+                            
+                            # Return the end year (for statements that span years)
+                            return statement_end_year
+                    
+                    if statement_start_year:
+                        break
+                
+                # Fallback: Try to find year in any table
+                if not statement_start_year:
+                    for table_idx, table in enumerate(tables):
+                        df = table.df.fillna('')
+                        for idx in range(min(20, len(df))):
+                            row_text = ' '.join([str(cell) for cell in df.iloc[idx].tolist()])
+                            year_match = re.search(r'\b(202[0-9]|203[0-9])\b', row_text)
+                            if year_match:
+                                year = year_match.group(1)
+                                print(f"    Found year {year} in Table {table_idx+1}, Row {idx}")
+                                statement_start_year = year
+                                statement_end_year = year
+                                self.metadata['statement_start_year'] = statement_start_year
+                                self.metadata['statement_end_year'] = statement_end_year
+                                return year
+                        if statement_start_year:
+                            break
+        except Exception as e:
+            print(f"Warning: Could not extract TD Visa statement year: {e}")
+        
+        print(f"    Warning: Could not extract TD Visa statement year, defaulting to 2024")
         # Set defaults
         self.metadata['statement_start_year'] = '2024'
         self.metadata['statement_end_year'] = '2024'

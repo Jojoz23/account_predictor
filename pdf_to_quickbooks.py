@@ -511,8 +511,15 @@ class PDFToQuickBooks:
             
             # Auto-detect credit card if not specified
             if is_credit_card is None:
-                is_credit_card = self._detect_credit_card(df)
-                detection_method = "auto-detected"
+                # First check: If Amount column exists but no Withdrawals/Deposits, it's likely a credit card
+                # (extract_bank_statements.py creates Amount column for credit cards)
+                if 'Withdrawals' not in df.columns and 'Deposits' not in df.columns:
+                    is_credit_card = True
+                    detection_method = "auto-detected (from structure)"
+                else:
+                    # Fallback to keyword-based detection
+                    is_credit_card = self._detect_credit_card(df)
+                    detection_method = "auto-detected"
             else:
                 detection_method = "user-specified"
             

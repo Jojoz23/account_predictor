@@ -259,17 +259,21 @@ def process_files(uploaded_files, is_credit_card, is_batch_mode):
             status_text.text(f"Processing {pdf_path.name}... ({idx + 1}/{len(pdf_paths)})")
             
             try:
-                # Process the PDF
+                # Process the PDF (auto-detect credit card)
                 with st.spinner(f"Extracting and categorizing {pdf_path.name}..."):
-                    df = pipeline.process_pdf(str(pdf_path), is_credit_card=False)  # Force bank mode for now
+                    df = pipeline.process_pdf(str(pdf_path), is_credit_card=None)  # Auto-detect credit card
                     
                     if df is not None and len(df) > 0:
+                        # Detect if this is a credit card from the dataframe structure
+                        # Credit cards have 'Amount' column, bank accounts have 'Withdrawals'/'Deposits'
+                        is_credit_card = 'Amount' in df.columns and 'Withdrawals' not in df.columns
+                        
                         # Generate output files in memory using proper save methods
                         excel_buffer = io.BytesIO()
                         iif_buffer = io.StringIO()
                         
-                        # Use pipeline's save_to_excel method (creates Debit/Deposit columns)
-                        pipeline.save_to_excel(df, excel_buffer, is_credit_card=False)
+                        # Use pipeline's save_to_excel method (handles credit cards automatically)
+                        pipeline.save_to_excel(df, excel_buffer, is_credit_card=is_credit_card)
                         excel_buffer.seek(0)
                         excel_data = excel_buffer.read()
                         
@@ -378,9 +382,16 @@ def show_results():
         if 'Date' in df_display.columns:
             df_display['Date'] = pd.to_datetime(df_display['Date']).dt.strftime('%Y-%m-%d')
         
-        # Create Debit and Deposit columns
-        df_display['Withdrawals'] = df_display['Amount'].apply(lambda x: f"${abs(x):,.2f}" if x < 0 else '')
-        df_display['Deposits'] = df_display['Amount'].apply(lambda x: f"${x:,.2f}" if x > 0 else '')
+        # Create Debit and Deposit columns for display
+        # Check if this is credit card format (has Amount, no Withdrawals/Deposits)
+        if 'Amount' in df_display.columns and 'Withdrawals' not in df_display.columns:
+            # Credit card format - create display columns from Amount
+            df_display['Withdrawals'] = df_display['Amount'].apply(lambda x: f"${abs(x):,.2f}" if x < 0 else '')
+            df_display['Deposits'] = df_display['Amount'].apply(lambda x: f"${x:,.2f}" if x > 0 else '')
+        elif 'Withdrawals' not in df_display.columns:
+            # Bank account format - create from Amount if needed
+            df_display['Withdrawals'] = df_display['Amount'].apply(lambda x: f"${abs(x):,.2f}" if x < 0 else '')
+            df_display['Deposits'] = df_display['Amount'].apply(lambda x: f"${x:,.2f}" if x > 0 else '')
         
         # Format confidence as percentage
         df_display['Confidence'] = df_display['Confidence'].apply(lambda x: f"{x:.1%}")
@@ -438,7 +449,9 @@ def show_results():
         # Create combined Excel
         combined_excel_buffer = io.BytesIO()
         pipeline = PDFToQuickBooks()
-        pipeline.save_to_excel(combined_df, combined_excel_buffer, is_credit_card=False)
+        # Detect if combined data is credit card (has Amount column, no Withdrawals/Deposits)
+        combined_is_credit_card = 'Amount' in combined_df.columns and 'Withdrawals' not in combined_df.columns
+        pipeline.save_to_excel(combined_df, combined_excel_buffer, is_credit_card=combined_is_credit_card)
         combined_excel_buffer.seek(0)
         combined_excel_data = combined_excel_buffer.read()
         
@@ -492,9 +505,16 @@ def show_results():
         if 'Date' in df_display.columns:
             df_display['Date'] = pd.to_datetime(df_display['Date']).dt.strftime('%Y-%m-%d')
         
-        # Create Debit and Deposit columns
-        df_display['Withdrawals'] = df_display['Amount'].apply(lambda x: f"${abs(x):,.2f}" if x < 0 else '')
-        df_display['Deposits'] = df_display['Amount'].apply(lambda x: f"${x:,.2f}" if x > 0 else '')
+        # Create Debit and Deposit columns for display
+        # Check if this is credit card format (has Amount, no Withdrawals/Deposits)
+        if 'Amount' in df_display.columns and 'Withdrawals' not in df_display.columns:
+            # Credit card format - create display columns from Amount
+            df_display['Withdrawals'] = df_display['Amount'].apply(lambda x: f"${abs(x):,.2f}" if x < 0 else '')
+            df_display['Deposits'] = df_display['Amount'].apply(lambda x: f"${x:,.2f}" if x > 0 else '')
+        elif 'Withdrawals' not in df_display.columns:
+            # Bank account format - create from Amount if needed
+            df_display['Withdrawals'] = df_display['Amount'].apply(lambda x: f"${abs(x):,.2f}" if x < 0 else '')
+            df_display['Deposits'] = df_display['Amount'].apply(lambda x: f"${x:,.2f}" if x > 0 else '')
         
         # Format confidence as percentage
         df_display['Confidence'] = df_display['Confidence'].apply(lambda x: f"{x:.1%}")
