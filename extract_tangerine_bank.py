@@ -13,9 +13,6 @@ from pathlib import Path
 import sys
 import io
 
-if sys.platform == 'win32':
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
-
 
 def extract_tangerine_bank_statement(pdf_path):
     """
@@ -420,6 +417,13 @@ def extract_tangerine_bank_statement(pdf_path):
 
 
 if __name__ == "__main__":
+    # Fix encoding for Windows
+    if sys.platform == 'win32':
+        try:
+            sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+        except:
+            pass
+    
     # Test with a Tangerine bank statement
     if len(sys.argv) > 1:
         pdf_path = sys.argv[1]

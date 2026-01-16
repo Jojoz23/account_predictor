@@ -226,9 +226,9 @@ class BankExtractorOrchestrator:
             TDVisaExtractor(),      # Check TD Visa before TD Bank
             ScotiaVisaExtractor(),  # Check Scotia Visa before Scotiabank
             NBCompanyCCExtractor(),  # Check NB Company Credit Card before NB Bank
+            TangerineExtractor(),   # Tangerine Bank (before Scotiabank to avoid false matches)
             TDBankExtractor(),
             ScotiabankExtractor(),
-            TangerineExtractor(),   # Tangerine Bank
             CIBCBankExtractor(),    # CIBC Bank (CAD and USD)
             NBBankExtractor(),      # National Bank (CAD and USD)
             GenericExtractor()  # Always last (fallback)
