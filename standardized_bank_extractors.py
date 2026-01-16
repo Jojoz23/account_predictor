@@ -170,6 +170,8 @@ from extractors import (
     extract_scotia_visa_statement,
     ScotiabankExtractor,
     TangerineExtractor,
+    CIBCBankExtractor,
+    extract_cibc_bank_statement,
     GenericExtractor,
 )
 
@@ -185,6 +187,8 @@ __all__ = [
     'extract_scotia_visa_statement',
     'ScotiabankExtractor',
     'TangerineExtractor',
+    'CIBCBankExtractor',
+    'extract_cibc_bank_statement',
     'GenericExtractor',
     'BankExtractorOrchestrator',
     'extract_bank_statement',
@@ -220,6 +224,7 @@ class BankExtractorOrchestrator:
             TDBankExtractor(),
             ScotiabankExtractor(),
             TangerineExtractor(),   # Tangerine Bank
+            CIBCBankExtractor(),    # CIBC Bank (CAD and USD)
             GenericExtractor()  # Always last (fallback)
         ]
     
@@ -256,6 +261,8 @@ class BankExtractorOrchestrator:
             return ScotiabankExtractor()
         elif 'tangerine' in bank_lower:
             return TangerineExtractor()
+        elif 'cibc' in bank_lower:
+            return CIBCBankExtractor()
         else:
             return GenericExtractor()
 

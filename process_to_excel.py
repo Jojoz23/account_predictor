@@ -1,0 +1,369 @@
+#!/usr/bin/env python3
+"""
+Generic Bank Statement to Excel Processor
+Processes any bank statement folder using standardized extractors
+Works with both bank accounts and credit cards
+"""
+
+import sys
+import io
+
+# Fix UTF-8 encoding for Windows console
+if sys.platform == 'win32':
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
+
+import pandas as pd
+from pathlib import Path
+from datetime import datetime
+from standardized_bank_extractors import extract_bank_statement
+from pdf_to_quickbooks import PDFToQuickBooks
+
+
+def process_folder_to_excel(folder_path, output_filename=None):
+    """
+    Process all PDFs in a folder and create a combined Excel file
+    Automatically detects bank type using standardized extractors
+    
+    Parameters:
+    - folder_path: Path to folder containing PDF files
+    - output_filename: Optional output filename (default: auto-generated with timestamp)
+    
+    Returns:
+    - Path to the created Excel file, or None if failed
+    """
+    folder = Path(folder_path)
+    
+    if not folder.exists():
+        print(f"❌ Folder not found: {folder_path}")
+        return None
+    
+    # Find all PDF files
+    pdf_files = sorted(folder.glob("*.pdf"))
+    
+    if not pdf_files:
+        print(f"❌ No PDF files found in: {folder_path}")
+        return None
+    
+    print(f"="*80)
+    print(f"PROCESSING BANK STATEMENTS: {folder.name}")
+    print(f"="*80)
+    print(f"\nFound {len(pdf_files)} PDF file(s)\n")
+    
+    # Initialize PDFToQuickBooks pipeline for account prediction
+    print("Loading AI model for account prediction...")
+    try:
+        pipeline = PDFToQuickBooks()
+    except Exception as e:
+        print(f"⚠️  Could not load AI model: {e}")
+        print("   Processing without account prediction...")
+        pipeline = None
+    
+    all_transactions = []
+    results_summary = []
+    is_credit_card = None  # Will be determined from first successful extraction
+    
+    for i, pdf_file in enumerate(pdf_files, 1):
+        print(f"\n[{i}/{len(pdf_files)}] Processing: {pdf_file.name}")
+        print("-" * 80)
+        
+        try:
+            # Extract using standardized extractor
+            result = extract_bank_statement(str(pdf_file))
+            
+            if not result.success:
+                print(f"❌ Extraction failed: {result.error}")
+                results_summary.append({
+                    'File': pdf_file.name,
+                    'Status': 'Failed',
+                    'Transactions': 0,
+                    'Opening_Balance': '',
+                    'Closing_Balance': '',
+                    'Error': result.error
+                })
+                continue
+            
+            df = result.df
+            
+            if df is None or len(df) == 0:
+                print(f"⚠️  No transactions extracted")
+                results_summary.append({
+                    'File': pdf_file.name,
+                    'Status': 'Failed',
+                    'Transactions': 0,
+                    'Opening_Balance': '',
+                    'Closing_Balance': '',
+                    'Error': 'No transactions extracted'
+                })
+                continue
+            
+            df = df.copy()
+            
+            # Determine if credit card from metadata (set once from first successful extraction)
+            if is_credit_card is None:
+                is_credit_card = result.metadata.get('is_credit_card', False)
+                print(f"   💳 Detected type: {'Credit Card' if is_credit_card else 'Bank Account'}")
+            
+            # Get opening/closing balance from metadata
+            opening_balance = result.metadata.get('opening_balance')
+            closing_balance = result.metadata.get('closing_balance')
+            
+            # Convert Date to datetime first (required for prediction)
+            if 'Date' in df.columns:
+                df['Date'] = pd.to_datetime(df['Date'], errors='coerce')
+                df = df[df['Date'].notna()].reset_index(drop=True)
+            
+            if len(df) == 0:
+                print(f"   ⚠️  No valid dates found, skipping...")
+                results_summary.append({
+                    'File': pdf_file.name,
+                    'Status': 'Failed',
+                    'Transactions': 0,
+                    'Opening_Balance': '',
+                    'Closing_Balance': '',
+                    'Error': 'No valid dates found'
+                })
+                continue
+            
+            print(f"✅ Extracted {len(df)} transactions")
+            
+            # Handle Amount column based on account type
+            if is_credit_card:
+                # Credit cards should already have Amount column
+                if 'Amount' not in df.columns:
+                    print(f"   ⚠️  Warning: Credit card missing Amount column")
+                    df['Amount'] = 0
+            else:
+                # Bank accounts: convert Withdrawals/Deposits to Amount if needed
+                if 'Amount' not in df.columns:
+                    if 'Withdrawals' in df.columns and 'Deposits' in df.columns:
+                        # Convert to Amount column (negative for withdrawals, positive for deposits)
+                        df['Withdrawals'] = pd.to_numeric(df['Withdrawals'], errors='coerce').fillna(0)
+                        df['Deposits'] = pd.to_numeric(df['Deposits'], errors='coerce').fillna(0)
+                        df['Amount'] = df['Deposits'] - df['Withdrawals']
+                    elif 'Withdrawals' in df.columns:
+                        df['Withdrawals'] = pd.to_numeric(df['Withdrawals'], errors='coerce').fillna(0)
+                        df['Amount'] = -df['Withdrawals']
+                        df['Deposits'] = 0
+                    elif 'Deposits' in df.columns:
+                        df['Deposits'] = pd.to_numeric(df['Deposits'], errors='coerce').fillna(0)
+                        df['Amount'] = df['Deposits']
+                        df['Withdrawals'] = 0
+                    else:
+                        print(f"   ⚠️  Warning: No amount columns found")
+                        df['Amount'] = 0
+            
+            # Predict accounts using AI
+            if pipeline is not None:
+                try:
+                    print("🧠 Predicting account categories...")
+                    df = pipeline.predict_accounts(df)
+                    print(f"✅ Account prediction complete")
+                except Exception as e:
+                    print(f"      ⚠️  Account prediction failed: {e}")
+                    df['Account'] = 'Uncategorized'
+                    df['Confidence'] = 0.0
+            else:
+                df['Account'] = 'Uncategorized'
+                df['Confidence'] = 0.0
+            
+            # Add source file
+            df['Source_File'] = pdf_file.name
+            
+            # Add sequence number to preserve order within file
+            df['_file_sequence'] = range(len(df))
+            
+            # Validate running balance matches closing balance
+            balance_match = False
+            final_rb = None
+            balance_diff = None
+            if 'Running_Balance' in df.columns and len(df) > 0:
+                final_rb = df['Running_Balance'].iloc[-1]
+                if closing_balance is not None:
+                    balance_diff = abs(final_rb - closing_balance)
+                    balance_match = balance_diff < 0.01
+            
+            all_transactions.append(df)
+            
+            print(f"   ✅ Processed {len(df)} transactions")
+            print(f"      Opening: ${opening_balance:,.2f}" if opening_balance is not None else "      Opening: N/A")
+            print(f"      Closing: ${closing_balance:,.2f}" if closing_balance is not None else "      Closing: N/A")
+            if final_rb is not None:
+                print(f"      Final Running Balance: ${final_rb:,.2f}")
+                if closing_balance is not None:
+                    if balance_match:
+                        print(f"      ✅ Running balance matches closing balance!")
+                    else:
+                        print(f"      ⚠️  Balance difference: ${balance_diff:,.2f}")
+            
+            results_summary.append({
+                'File': pdf_file.name,
+                'Status': 'Success' if balance_match or closing_balance is None else 'Warning',
+                'Transactions': len(df),
+                'Opening_Balance': opening_balance if opening_balance is not None else '',
+                'Closing_Balance': closing_balance if closing_balance is not None else '',
+                'Final_Running_Balance': final_rb if final_rb is not None else '',
+                'Balance_Match': 'Yes' if balance_match else ('N/A' if closing_balance is None else 'No'),
+                'Balance_Diff': f"${balance_diff:,.2f}" if balance_diff is not None else ''
+            })
+            
+        except Exception as e:
+            print(f"❌ Error processing {pdf_file.name}: {e}")
+            import traceback
+            traceback.print_exc()
+            results_summary.append({
+                'File': pdf_file.name,
+                'Status': 'Error',
+                'Transactions': 0,
+                'Opening_Balance': '',
+                'Closing_Balance': '',
+                'Error': str(e)
+            })
+            continue
+    
+    if not all_transactions:
+        print("\n❌ No transactions extracted from any files")
+        return None
+    
+    # Combine all transactions
+    combined_df = pd.concat(all_transactions, ignore_index=True)
+    
+    # Sort by date, but preserve original order within same date using file sequence
+    if 'Date' in combined_df.columns:
+        combined_df['Date'] = pd.to_datetime(combined_df['Date'], errors='coerce')
+        # Sort by date first, then by source file name, then by sequence within file
+        combined_df = combined_df.sort_values(['Date', 'Source_File', '_file_sequence']).reset_index(drop=True)
+        # Remove the temporary sequence column
+        combined_df = combined_df.drop(columns=['_file_sequence'])
+    
+    # Select columns based on account type
+    if is_credit_card:
+        # Credit card format: Date, Description, Account, Amount, Running_Balance
+        columns_to_keep = []
+        for col in ['Date', 'Description', 'Account', 'Amount', 'Running_Balance']:
+            if col in combined_df.columns:
+                columns_to_keep.append(col)
+    else:
+        # Bank account format: Date, Description, Account, Withdrawals, Deposits, Running_Balance
+        columns_to_keep = []
+        for col in ['Date', 'Description', 'Account', 'Withdrawals', 'Deposits', 'Running_Balance']:
+            if col in combined_df.columns:
+                columns_to_keep.append(col)
+    
+    combined_df_output = combined_df[columns_to_keep].copy()
+    
+    # Format dates to date-only (remove time component) for Excel
+    if 'Date' in combined_df_output.columns:
+        combined_df_output['Date'] = pd.to_datetime(combined_df_output['Date']).dt.date
+    
+    # Generate output filename
+    if output_filename is None:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        folder_name = folder.name.replace(" ", "_").replace("-", "_")
+        output_filename = f"{folder_name}_combined_{timestamp}.xlsx"
+    
+    output_path = folder.parent / output_filename
+    
+    # Create summary DataFrame
+    summary_df = pd.DataFrame(results_summary)
+    
+    # Save to Excel with multiple sheets
+    print(f"\n{'='*80}")
+    print(f"SAVING COMBINED RESULTS")
+    print(f"{'='*80}")
+    print(f"\nTotal transactions: {len(combined_df)}")
+    print(f"Files processed: {len(all_transactions)}")
+    print(f"Account type: {'Credit Card' if is_credit_card else 'Bank Account'}")
+    print(f"\nSaving to: {output_path}")
+    
+    with pd.ExcelWriter(output_path, engine='openpyxl') as writer:
+        # Main transactions sheet
+        combined_df_output.to_excel(writer, sheet_name='Transactions', index=False)
+        
+        # Summary sheet
+        summary_df.to_excel(writer, sheet_name='Summary', index=False)
+        
+        # By account (if Account column exists)
+        if 'Account' in combined_df.columns:
+            if is_credit_card:
+                account_summary = combined_df.groupby('Account').agg({
+                    'Amount': 'sum'
+                }).reset_index()
+            else:
+                account_summary = combined_df.groupby('Account').agg({
+                    'Withdrawals': 'sum' if 'Withdrawals' in combined_df.columns else 'count',
+                    'Deposits': 'sum' if 'Deposits' in combined_df.columns else 'count'
+                }).reset_index()
+            account_summary.to_excel(writer, sheet_name='By Account', index=False)
+    
+    print(f"✅ Combined Excel file saved: {output_path}")
+    print(f"\n📈 Summary:")
+    print(f"   Total files processed: {len(pdf_files)}")
+    print(f"   Successful: {len([r for r in results_summary if r['Status'] == 'Success'])}")
+    print(f"   Failed: {len([r for r in results_summary if r['Status'] != 'Success'])}")
+    print(f"   Total transactions: {len(combined_df)}")
+    
+    return output_path
+
+
+def main():
+    """Main function - can be called with folder path or used interactively"""
+    import argparse
+    
+    parser = argparse.ArgumentParser(
+        description='Process bank statement PDFs to combined Excel file',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  python process_to_excel.py "data/Scotia- Personal credit card"
+  python process_to_excel.py "data/Account Statements CAD - CIBC 4213"
+  python process_to_excel.py "data/NB- Company Credit Card 1074" --output "nb_cc_combined.xlsx"
+        """
+    )
+    
+    parser.add_argument(
+        'folder_path',
+        nargs='?',
+        help='Path to folder containing PDF files'
+    )
+    parser.add_argument(
+        '--output', '-o',
+        dest='output_filename',
+        help='Output filename (default: auto-generated with timestamp)'
+    )
+    
+    args = parser.parse_args()
+    
+    # If folder path provided, use it; otherwise show usage
+    if args.folder_path:
+        folder_path = args.folder_path
+    else:
+        parser.print_help()
+        print("\n" + "="*80)
+        print("Please provide a folder path as an argument")
+        print("="*80)
+        return
+    
+    print("="*80)
+    print("BANK STATEMENTS - COMBINED EXCEL GENERATOR")
+    print("="*80)
+    print("\nThis script processes bank statements using standardized extractors")
+    print("and creates a combined Excel file with account predictions.\n")
+    
+    output_path = process_folder_to_excel(folder_path, args.output_filename)
+    
+    print("\n" + "="*80)
+    print("SUMMARY")
+    print("="*80)
+    
+    if output_path:
+        print(f"\n✅ Successfully created combined Excel file:")
+        print(f"   {output_path}")
+    else:
+        print("\n❌ Processing failed or no files were processed")
+    
+    print("\n" + "="*80)
+
+
+if __name__ == "__main__":
+    main()

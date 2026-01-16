@@ -13,10 +13,26 @@ It checks:
 - Dates
 - Descriptions
 - Running balances
+
+Usage:
+    # Run all tests
+    python test_standardized_extractors.py
+    
+    # Run specific bank(s)
+    python test_standardized_extractors.py --cibc
+    python test_standardized_extractors.py --td-bank --td-visa
+    python test_standardized_extractors.py --scotia --tangerine
+    
+    # Run with verbose output
+    python test_standardized_extractors.py --cibc --verbose
+    
+    # List available tests
+    python test_standardized_extractors.py --list
 """
 
 import sys
 import io
+import argparse
 import pandas as pd
 from pathlib import Path
 from standardized_bank_extractors import extract_bank_statement, BankExtractorOrchestrator
@@ -547,47 +563,252 @@ def test_tangerine(pdf_path: str, verbose: bool = False):
     return all_match
 
 
+def test_cibc(pdf_path: str, verbose: bool = False):
+    """Test CIBC Bank extraction"""
+    if verbose:
+        print("\n" + "="*80)
+        print("TESTING CIBC BANK EXTRACTION")
+        print("="*80)
+        print(f"PDF: {Path(pdf_path).name}\n")
+    
+    # Original extraction
+    if verbose:
+        print("1. Running original extraction (test_cibc_cad_complete.py)...")
+    try:
+        from test_cibc_cad_complete import extract_cibc_cad_statement
+        result_original = extract_cibc_cad_statement(pdf_path)
+        
+        # Extract data from result dict
+        transactions_orig = result_original.get('transactions', [])
+        if not transactions_orig:
+            if verbose:
+                print(f"   ❌ Error: Extraction returned no transactions")
+            return False
+        
+        df_original = pd.DataFrame(transactions_orig)
+        opening_orig = result_original.get('opening_balance')
+        closing_orig = result_original.get('closing_balance')
+        
+        if verbose:
+            print(f"   ✅ Original: {len(df_original)} transactions")
+            print(f"   Opening: ${opening_orig:,.2f}" if opening_orig else "   Opening: Not found")
+            print(f"   Closing: ${closing_orig:,.2f}" if closing_orig else "   Closing: Not found")
+    except Exception as e:
+        if verbose:
+            print(f"   ❌ Error: {e}")
+            import traceback
+            traceback.print_exc()
+        return False
+    
+    # Standardized extraction
+    if verbose:
+        print("\n2. Running standardized extraction...")
+    try:
+        from standardized_bank_extractors import extract_bank_statement
+        result = extract_bank_statement(pdf_path)
+        if not result.success:
+            if verbose:
+                print(f"   ❌ Error: {result.error}")
+            return False
+        
+        df_standardized = result.df
+        opening_std = result.metadata.get('opening_balance')
+        closing_std = result.metadata.get('closing_balance')
+        
+        if verbose:
+            print(f"   ✅ Standardized: {len(df_standardized)} transactions")
+            print(f"   Opening: ${opening_std:,.2f}" if opening_std else "   Opening: Not found")
+            print(f"   Closing: ${closing_std:,.2f}" if closing_std else "   Closing: Not found")
+    except Exception as e:
+        if verbose:
+            print(f"   ❌ Error: {e}")
+            import traceback
+            traceback.print_exc()
+        return False
+    
+    # Compare
+    if verbose:
+        print("\n3. Comparing results...")
+    
+    opening_match = (opening_orig is None and opening_std is None) or (opening_orig is not None and opening_std is not None and abs(opening_orig - opening_std) < 0.01)
+    closing_match = (closing_orig is None and closing_std is None) or (closing_orig is not None and closing_std is not None and abs(closing_orig - closing_std) < 0.01)
+    
+    if verbose:
+        print(f"   Opening balance match: {'✅' if opening_match else '❌'}")
+        if not opening_match:
+            print(f"      Original: ${opening_orig:,.2f}" if opening_orig else "      Original: None")
+            print(f"      Standardized: ${opening_std:,.2f}" if opening_std else "      Standardized: None")
+        
+        print(f"   Closing balance match: {'✅' if closing_match else '❌'}")
+        if not closing_match:
+            print(f"      Original: ${closing_orig:,.2f}" if closing_orig else "      Original: None")
+            print(f"      Standardized: ${closing_std:,.2f}" if closing_std else "      Standardized: None")
+    
+    differences = compare_dataframes(df_original, df_standardized)
+    
+    if verbose:
+        print(f"   Transaction count match: {'✅' if differences['row_count_match'] else '❌'}")
+        if not differences['row_count_match']:
+            print(f"      Original: {len(df_original)} transactions")
+            print(f"      Standardized: {len(df_standardized)} transactions")
+        
+        if differences['transaction_differences']:
+            print(f"   ⚠️  Found {len(differences['transaction_differences'])} transaction differences:")
+            for diff in differences['transaction_differences'][:5]:
+                print(f"      Row {diff['row_index']}: {diff}")
+        else:
+            print(f"   ✅ All transactions match!")
+    else:
+        # Brief summary for non-verbose mode
+        if not opening_match or not closing_match or not differences['row_count_match'] or differences['transaction_differences']:
+            print(f"   ❌ FAIL - ", end="")
+            issues = []
+            if not opening_match:
+                issues.append("opening balance mismatch")
+            if not closing_match:
+                issues.append("closing balance mismatch")
+            if not differences['row_count_match']:
+                issues.append(f"transaction count mismatch ({len(df_original)} vs {len(df_standardized)})")
+            if differences['transaction_differences']:
+                issues.append(f"{len(differences['transaction_differences'])} transaction differences")
+            print(", ".join(issues))
+        else:
+            print(f"   ✅ PASS - {len(df_original)} transactions, balances match")
+    
+    all_match = (
+        opening_match and 
+        closing_match and 
+        differences['row_count_match'] and 
+        len(differences['transaction_differences']) == 0
+    )
+    
+    return all_match
+
+
 def main():
     """Run tests on all files in each folder"""
-    print("="*80)
-    print("STANDARDIZED EXTRACTORS VALIDATION TEST - ALL FILES")
-    print("="*80)
-    print("\nThis script compares original extraction scripts with standardized extractors")
-    print("to ensure they produce identical results.\n")
+    # Parse command-line arguments
+    parser = argparse.ArgumentParser(
+        description='Test standardized extractors against original extraction scripts',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Run all tests
+  python test_standardized_extractors.py
+  
+  # Run specific bank(s)
+  python test_standardized_extractors.py --cibc
+  python test_standardized_extractors.py --td-bank --td-visa
+  python test_standardized_extractors.py --scotia --tangerine
+  
+  # Run with verbose output
+  python test_standardized_extractors.py --cibc --verbose
+  
+  # List available tests
+  python test_standardized_extractors.py --list
+        """
+    )
     
-    # Define folders and their test functions
-    test_configs = [
+    # Bank selection flags
+    parser.add_argument('--td-bank', action='store_true', help='Test TD Bank (both 4738 and 7206)')
+    parser.add_argument('--td-visa', action='store_true', help='Test TD Visa (both 6157 and 7744)')
+    parser.add_argument('--scotia', action='store_true', help='Test Scotia Visa')
+    parser.add_argument('--tangerine', action='store_true', help='Test Tangerine Bank')
+    parser.add_argument('--cibc', action='store_true', help='Test CIBC Bank (both CAD and USD)')
+    
+    # Other options
+    parser.add_argument('--verbose', '-v', action='store_true', help='Verbose output for each test')
+    parser.add_argument('--list', action='store_true', help='List available test configurations')
+    
+    args = parser.parse_args()
+    
+    # Define all available test configurations
+    all_test_configs = [
         {
             'name': 'TD Bank - 4738',
             'folder': Path("data/TD bank - 4738"),
-            'test_func': test_td_bank
+            'test_func': test_td_bank,
+            'flag': 'td-bank'
         },
         {
             'name': 'TD Bank - 7206',
             'folder': Path("data/TD bank - 7206"),
-            'test_func': test_td_bank
+            'test_func': test_td_bank,
+            'flag': 'td-bank'
         },
         {
             'name': 'TD Visa - 6157',
             'folder': Path("data/TD VISA 6157"),
-            'test_func': test_td_visa
+            'test_func': test_td_visa,
+            'flag': 'td-visa'
         },
         {
             'name': 'TD Visa - 7744',
             'folder': Path("data/TD VISA 7744"),
-            'test_func': test_td_visa
+            'test_func': test_td_visa,
+            'flag': 'td-visa'
         },
         {
             'name': 'Scotia Visa',
             'folder': Path("data/Scotia Visa"),
-            'test_func': test_scotia_visa
+            'test_func': test_scotia_visa,
+            'flag': 'scotia'
         },
         {
             'name': 'Tangerine Bank',
             'folder': Path("data/Tangeriene bank"),
-            'test_func': test_tangerine
+            'test_func': test_tangerine,
+            'flag': 'tangerine'
+        },
+        {
+            'name': 'CIBC Bank - CAD',
+            'folder': Path("data/Account Statements CAD - CIBC 4213"),
+            'test_func': test_cibc,
+            'flag': 'cibc'
+        },
+        {
+            'name': 'CIBC Bank - USD',
+            'folder': Path("data/Account Statements USD - CIBC 1014"),
+            'test_func': test_cibc,
+            'flag': 'cibc'
         }
     ]
+    
+    # Handle --list flag
+    if args.list:
+        print("Available test configurations:")
+        print("="*80)
+        for config in all_test_configs:
+            print(f"  {config['name']:30} (--{config['flag']})")
+        print("\nUse --help for usage examples")
+        return
+    
+    # Filter test configs based on flags
+    if any([args.td_bank, args.td_visa, args.scotia, args.tangerine, args.cibc]):
+        # User specified specific tests
+        test_configs = []
+        if args.td_bank:
+            test_configs.extend([c for c in all_test_configs if c['flag'] == 'td-bank'])
+        if args.td_visa:
+            test_configs.extend([c for c in all_test_configs if c['flag'] == 'td-visa'])
+        if args.scotia:
+            test_configs.extend([c for c in all_test_configs if c['flag'] == 'scotia'])
+        if args.tangerine:
+            test_configs.extend([c for c in all_test_configs if c['flag'] == 'tangerine'])
+        if args.cibc:
+            test_configs.extend([c for c in all_test_configs if c['flag'] == 'cibc'])
+    else:
+        # No flags specified, run all tests
+        test_configs = all_test_configs
+    
+    print("="*80)
+    print("STANDARDIZED EXTRACTORS VALIDATION TEST")
+    print("="*80)
+    print("\nThis script compares original extraction scripts with standardized extractors")
+    print("to ensure they produce identical results.\n")
+    
+    if test_configs != all_test_configs:
+        print(f"Running selected tests: {', '.join(set(c['flag'] for c in test_configs))}\n")
     
     all_results = {}
     
@@ -622,7 +843,7 @@ def main():
             print(f"{'─'*80}")
             
             try:
-                result = test_func(str(pdf_file), verbose=False)
+                result = test_func(str(pdf_file), verbose=args.verbose)
                 if result:
                     results['passed'] += 1
                     results['files'].append({'file': pdf_file.name, 'status': 'PASS'})
