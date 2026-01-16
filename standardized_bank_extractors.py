@@ -173,6 +173,7 @@ from extractors import (
     CIBCBankExtractor,
     extract_cibc_bank_statement,
     NBBankExtractor,
+    NBCompanyCCExtractor,
     GenericExtractor,
 )
 
@@ -191,6 +192,7 @@ __all__ = [
     'CIBCBankExtractor',
     'extract_cibc_bank_statement',
     'NBBankExtractor',
+    'NBCompanyCCExtractor',
     'GenericExtractor',
     'BankExtractorOrchestrator',
     'extract_bank_statement',
@@ -223,6 +225,7 @@ class BankExtractorOrchestrator:
         self.extractors = [
             TDVisaExtractor(),      # Check TD Visa before TD Bank
             ScotiaVisaExtractor(),  # Check Scotia Visa before Scotiabank
+            NBCompanyCCExtractor(),  # Check NB Company Credit Card before NB Bank
             TDBankExtractor(),
             ScotiabankExtractor(),
             TangerineExtractor(),   # Tangerine Bank
@@ -266,6 +269,8 @@ class BankExtractorOrchestrator:
             return TangerineExtractor()
         elif 'cibc' in bank_lower:
             return CIBCBankExtractor()
+        elif ('nb' in bank_lower or 'national bank' in bank_lower) and ('company credit card' in bank_lower or 'company cc' in bank_lower):
+            return NBCompanyCCExtractor()
         elif 'nb' in bank_lower or 'national bank' in bank_lower:
             return NBBankExtractor()
         else:
