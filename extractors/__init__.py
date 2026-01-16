@@ -11,6 +11,7 @@ from .scotia_visa_extractor import ScotiaVisaExtractor, extract_scotia_visa_stat
 from .scotiabank_extractor import ScotiabankExtractor
 from .tangerine_extractor import TangerineExtractor
 from .cibc_bank_extractor import CIBCBankExtractor, extract_cibc_bank_statement
+from .nb_bank_extractor import NBBankExtractor
 from .generic_extractor import GenericExtractor
 
 __all__ = [
@@ -23,5 +24,6 @@ __all__ = [
     'TangerineExtractor',
     'CIBCBankExtractor',
     'extract_cibc_bank_statement',
+    'NBBankExtractor',
     'GenericExtractor',
 ]
