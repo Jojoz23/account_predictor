@@ -108,35 +108,24 @@ def extract_cibc_bank_statement(pdf_path: str):
                         rest, current_date, month_map, statement_year, lines, i, transactions, opening_balance
                     )
                     if transaction:
-                        # Skip opening balance and balance forward rows (they're metadata, not transactions)
-                        desc = transaction.get('Description', '')
-                        if 'Opening balance' not in desc and 'Balance forward' not in desc:
-                            transactions.append(transaction)
+                        # Include all transactions, including opening balance (matching original script)
+                        transactions.append(transaction)
             else:
                 # Continuation line (could be description continuation or new transaction on same date)
                 if current_date:
-                    # Skip lines that look like exchange rate calculations (e.g., "4158.60 CAD X 1.3862")
-                    line_upper = line.upper()
-                    is_exchange_rate = (
-                        (' X ' in line_upper or 'X ' in line_upper) and 
-                        ('CAD' in line_upper or 'USD' in line_upper)
-                    )
-                    if is_exchange_rate:
-                        i += 1
-                        continue
-                    
+                    # Check if line has numbers that look like amounts
                     amount_pattern = r'\b[\d,]+\.\d{2}\b'
                     amounts = re.findall(amount_pattern, line)
                     
-                    # Only parse as transaction if it has 2+ amounts (amount + balance pattern)
-                    if amounts and len(amounts) >= 2:
-                        transaction = _parse_cibc_transaction_line(
-                            line, current_date, month_map, statement_year, lines, i, transactions, opening_balance
-                        )
-                        if transaction:
-                            # Skip opening balance and balance forward rows (they're metadata, not transactions)
-                            desc = transaction.get('Description', '')
-                            if 'Opening balance' not in desc and 'Balance forward' not in desc:
+                    # Parse as transaction if it has 1+ amounts (matching original script)
+                    if amounts and len(amounts) >= 1:
+                        # Skip if it looks like a continuation of description (just text)
+                        if not re.match(r'^[A-Z\s\-]+$', line) or len(amounts) >= 2:
+                            transaction = _parse_cibc_transaction_line(
+                                line, current_date, month_map, statement_year, lines, i, transactions, opening_balance
+                            )
+                            if transaction:
+                                # Include all transactions, including exchange rate lines (matching original script)
                                 transactions.append(transaction)
             
             i += 1
@@ -151,13 +140,10 @@ def extract_cibc_bank_statement(pdf_path: str):
     if 'Date' in df.columns:
         df['Date'] = pd.to_datetime(df['Date'])
     
-    # Calculate running balance
-    if opening_balance is not None:
-        if 'Withdrawals' in df.columns and 'Deposits' in df.columns:
-            df['Net_Change'] = df['Deposits'].fillna(0) - df['Withdrawals'].fillna(0)
-            df['Running_Balance'] = opening_balance + df['Net_Change'].cumsum()
-        elif 'Balance' in df.columns:
-            df['Running_Balance'] = df['Balance']
+    # Use Balance column directly from PDF as Running_Balance (matching original script)
+    # The original script doesn't calculate deposits from balance changes - it just uses Balance from PDF
+    if 'Balance' in df.columns:
+        df['Running_Balance'] = df['Balance']
     
     return df, opening_balance, closing_balance, statement_year, account_number
 
@@ -204,47 +190,10 @@ def _parse_cibc_transaction_line(line_text, trans_date, month_map, statement_yea
     first_amount_pos = amounts[0][0]
     description = line_text[:first_amount_pos].strip()
     
-    # Get transaction amount (first amount if there are 2+ amounts)
-    amount = amounts[0][1] if len(amounts) >= 2 else None
-    
-    # Determine if it's a deposit or withdrawal by comparing balance changes
-    withdrawal = None
-    deposit = None
-    
-    if amount is not None and balance is not None:
-        # Determine previous balance
-        if len(transactions) > 0:
-            # Use last transaction's balance
-            prev_balance = transactions[-1].get('Balance')
-        elif opening_balance is not None:
-            # Use opening balance for first transaction
-            prev_balance = opening_balance
-        else:
-            prev_balance = None
-        
-        if prev_balance is not None:
-            balance_change = balance - prev_balance
-            
-            # If balance increased, it's a deposit
-            # If balance decreased, it's a withdrawal
-            if abs(balance_change - amount) < 0.01:  # Balance increased by amount = deposit
-                deposit = amount
-            elif abs(balance_change + amount) < 0.01:  # Balance decreased by amount = withdrawal
-                withdrawal = amount
-            else:
-                # Balance change doesn't match amount exactly - use direction
-                if balance_change > 0:
-                    deposit = amount
-                else:
-                    withdrawal = amount
-        else:
-            # No previous balance available - use heuristics
-            # ALL CAPS descriptions often indicate withdrawals
-            desc_upper = description.upper()
-            if description == desc_upper and len(description) > 3:  # All caps
-                withdrawal = amount
-            else:
-                deposit = amount
+    # Withdrawal is the first amount (if there are 2+ amounts)
+    # If only 1 amount, it's the balance (opening balance case handled above)
+    withdrawal = amounts[0][1] if len(amounts) >= 2 else None
+    deposit = None  # CIBC format doesn't show deposits in this format (usually 0)
     
     # Read continuation lines for description (up to 3 lines)
     j = line_idx + 1
@@ -252,14 +201,16 @@ def _parse_cibc_transaction_line(line_text, trans_date, month_map, statement_yea
     while j < len(all_lines) and continuation_count < 3:
         next_line = all_lines[j].strip()
         
-        # Stop if next line looks like a new transaction
+        # Stop if next line looks like a new transaction (has date or amounts)
         if re.match(r'^(\w{3})\s+\d{1,2}\s+', next_line):
             break
         if re.search(r'\b[\d,]+\.\d{2}\b', next_line) and len(re.findall(r'\b[\d,]+\.\d{2}\b', next_line)) >= 2:
+            # Looks like a new transaction (has 2+ amounts)
             break
         if "Page" in next_line or "continued" in next_line.lower() or "Closing balance" in next_line:
             break
         
+        # Add to description (could be merchant name, account number, etc.)
         if next_line:
             description += " " + next_line
             continuation_count += 1

@@ -127,6 +127,56 @@ def process_folder_to_excel(folder_path, output_filename=None):
             
             print(f"✅ Extracted {len(df)} transactions")
             
+            # Filter out "Opening balance", "Balance forward", and empty/NaN descriptions (for Excel output consistency)
+            if 'Description' in df.columns:
+                mask = (
+                    ~df['Description'].astype(str).str.contains('Opening balance|Balance forward', case=False, na=False) &
+                    df['Description'].notna() &
+                    (df['Description'].astype(str).str.strip() != '') &
+                    (df['Description'].astype(str).str.strip() != 'nan')
+                )
+                df = df[mask].reset_index(drop=True)
+                print(f"   Filtered out opening/balance/empty rows: {len(df)} transactions remaining")
+            
+            # For CIBC: Calculate deposits from balance changes (if Balance column exists)
+            # This matches the Jan 12 Excel output which correctly identifies deposits
+            if result.metadata.get('bank') == 'CIBC' and 'Balance' in df.columns and 'Withdrawals' in df.columns and 'Deposits' in df.columns:
+                # Calculate previous balance for each transaction
+                df['Prev_Balance'] = df['Balance'].shift(1)
+                # For first transaction after filtering, use opening balance
+                if opening_balance is not None:
+                    df.loc[df.index[0], 'Prev_Balance'] = opening_balance
+                
+                # Calculate balance change
+                df['Balance_Change'] = df['Balance'] - df['Prev_Balance']
+                
+                # Update deposits and withdrawals based on balance changes
+                for idx in df.index:
+                    withdrawal = df.at[idx, 'Withdrawals']
+                    balance_change = df.at[idx, 'Balance_Change']
+                    
+                    if pd.notna(withdrawal) and withdrawal != 0:
+                        # If balance increased despite having a withdrawal amount, it's actually a deposit
+                        if balance_change > 0:
+                            df.at[idx, 'Deposits'] = withdrawal
+                            df.at[idx, 'Withdrawals'] = 0
+                    elif pd.isna(withdrawal) or withdrawal == 0:
+                        # No withdrawal amount set, check if balance change indicates deposit
+                        if balance_change > 0:
+                            df.at[idx, 'Deposits'] = abs(balance_change)
+                            df.at[idx, 'Withdrawals'] = 0
+                        elif balance_change < 0:
+                            df.at[idx, 'Withdrawals'] = abs(balance_change)
+                            df.at[idx, 'Deposits'] = 0
+                
+                # Drop temporary columns
+                df = df.drop(columns=['Prev_Balance', 'Balance_Change'], errors='ignore')
+                
+                # Recalculate Running_Balance using deposits/withdrawals
+                if opening_balance is not None:
+                    df['Net_Change'] = df['Deposits'].fillna(0) - df['Withdrawals'].fillna(0)
+                    df['Running_Balance'] = opening_balance + df['Net_Change'].cumsum()
+            
             # Handle Amount column based on account type
             if is_credit_card:
                 # Credit cards should already have Amount column
