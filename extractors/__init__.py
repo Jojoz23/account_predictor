@@ -13,6 +13,7 @@ from .tangerine_extractor import TangerineExtractor
 from .cibc_bank_extractor import CIBCBankExtractor, extract_cibc_bank_statement
 from .nb_bank_extractor import NBBankExtractor
 from .nb_company_cc_extractor import NBCompanyCCExtractor
+from .rbc_chequing_extractor import RBCChequingExtractor
 from .generic_extractor import GenericExtractor
 
 __all__ = [
@@ -27,5 +28,6 @@ __all__ = [
     'extract_cibc_bank_statement',
     'NBBankExtractor',
     'NBCompanyCCExtractor',
+    'RBCChequingExtractor',
     'GenericExtractor',
 ]

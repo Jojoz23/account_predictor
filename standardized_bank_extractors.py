@@ -222,10 +222,13 @@ class BankExtractorOrchestrator:
         """Initialize with all available extractors"""
         # Order matters! Check credit cards BEFORE bank accounts
         # because credit card statements might also contain bank name
+        from extractors.rbc_chequing_extractor import RBCChequingExtractor
+        
         self.extractors = [
             TDVisaExtractor(),      # Check TD Visa before TD Bank
             ScotiaVisaExtractor(),  # Check Scotia Visa before Scotiabank
             NBCompanyCCExtractor(),  # Check NB Company Credit Card before NB Bank
+            RBCChequingExtractor(), # RBC Chequing (before other RBC products)
             TangerineExtractor(),   # Tangerine Bank (before Scotiabank to avoid false matches)
             TDBankExtractor(),
             ScotiabankExtractor(),
@@ -273,6 +276,9 @@ class BankExtractorOrchestrator:
             return NBCompanyCCExtractor()
         elif 'nb' in bank_lower or 'national bank' in bank_lower:
             return NBBankExtractor()
+        elif ('rbc' in bank_lower or 'royal bank' in bank_lower) and ('chequing' in bank_lower or 'business account' in bank_lower):
+            from extractors.rbc_chequing_extractor import RBCChequingExtractor
+            return RBCChequingExtractor()
         else:
             return GenericExtractor()
 
