@@ -183,6 +183,11 @@ def process_folder_to_excel(folder_path, output_filename=None):
                 if 'Amount' not in df.columns:
                     print(f"   ⚠️  Warning: Credit card missing Amount column")
                     df['Amount'] = 0
+                # Convert Amount to numeric
+                df['Amount'] = pd.to_numeric(df['Amount'], errors='coerce').fillna(0)
+                # INVERT amounts for AI model: Credit cards show +$100 = Charge (expense), -$50 = Payment (income)
+                # Model expects: -$100 = Expense, +$50 = Income
+                df['Amount'] = -df['Amount']
             else:
                 # Bank accounts: convert Withdrawals/Deposits to Amount if needed
                 if 'Amount' not in df.columns:
@@ -202,6 +207,9 @@ def process_folder_to_excel(folder_path, output_filename=None):
                     else:
                         print(f"   ⚠️  Warning: No amount columns found")
                         df['Amount'] = 0
+                else:
+                    # Ensure Amount is numeric
+                    df['Amount'] = pd.to_numeric(df['Amount'], errors='coerce').fillna(0)
             
             # Predict accounts using AI
             if pipeline is not None:
@@ -209,10 +217,16 @@ def process_folder_to_excel(folder_path, output_filename=None):
                     print("🧠 Predicting account categories...")
                     df = pipeline.predict_accounts(df)
                     print(f"✅ Account prediction complete")
+                    # Invert amounts back for credit cards (for Excel output)
+                    if is_credit_card:
+                        df['Amount'] = -df['Amount']
                 except Exception as e:
                     print(f"      ⚠️  Account prediction failed: {e}")
                     df['Account'] = 'Uncategorized'
                     df['Confidence'] = 0.0
+                    # Invert amounts back if prediction failed
+                    if is_credit_card:
+                        df['Amount'] = -df['Amount']
             else:
                 df['Account'] = 'Uncategorized'
                 df['Confidence'] = 0.0

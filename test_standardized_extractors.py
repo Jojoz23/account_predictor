@@ -35,21 +35,44 @@ import io
 import argparse
 import pandas as pd
 from pathlib import Path
-from standardized_bank_extractors import extract_bank_statement, BankExtractorOrchestrator
 
-# Fix encoding for Windows
+# Fix encoding for Windows - do this before other imports
 if sys.platform == 'win32':
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+    try:
+        # Only wrap if not already wrapped and buffer exists
+        if hasattr(sys.stdout, 'buffer') and not sys.stdout.buffer.closed:
+            if not isinstance(sys.stdout, io.TextIOWrapper):
+                sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+    except (AttributeError, ValueError, TypeError):
+        pass  # stdout might already be wrapped or not have buffer
+
+from standardized_bank_extractors import extract_bank_statement, BankExtractorOrchestrator
 
 
 def compare_dataframes(df1: pd.DataFrame, df2: pd.DataFrame, name1: str = "Original", name2: str = "Standardized") -> dict:
     """Compare two DataFrames and return differences"""
+    # For credit cards, Balance and Running_Balance are equivalent
+    # Normalize column names for comparison
+    df1_cols = set(df1.columns)
+    df2_cols = set(df2.columns)
+    
+    # If one has 'Balance' and other has 'Running_Balance', treat as equivalent
+    if 'Balance' in df1_cols and 'Running_Balance' in df2_cols:
+        df1_cols_normalized = df1_cols - {'Balance'} | {'Running_Balance'}
+        df2_cols_normalized = df2_cols
+    elif 'Running_Balance' in df1_cols and 'Balance' in df2_cols:
+        df1_cols_normalized = df1_cols
+        df2_cols_normalized = df2_cols - {'Balance'} | {'Running_Balance'}
+    else:
+        df1_cols_normalized = df1_cols
+        df2_cols_normalized = df2_cols
+    
     differences = {
         'row_count_match': len(df1) == len(df2),
         'row_count_diff': abs(len(df1) - len(df2)),
-        'column_match': set(df1.columns) == set(df2.columns),
-        'missing_columns': set(df1.columns) - set(df2.columns),
-        'extra_columns': set(df2.columns) - set(df1.columns),
+        'column_match': df1_cols_normalized == df2_cols_normalized,
+        'missing_columns': df1_cols - df2_cols,
+        'extra_columns': df2_cols - df1_cols,
         'transaction_differences': []
     }
     
@@ -97,12 +120,21 @@ def compare_dataframes(df1: pd.DataFrame, df2: pd.DataFrame, name1: str = "Origi
             if abs(d1 - d2) > 0.01:
                 row_diff['Deposits'] = f"{d1} != {d2}"
         
-        # Compare Running Balance
-        if 'Running_Balance' in df1.columns and 'Running_Balance' in df2.columns:
+        # Compare Running Balance (or Balance column)
+        rb1 = None
+        rb2 = None
+        if 'Running_Balance' in df1.columns:
             rb1 = row1['Running_Balance'] if pd.notna(row1['Running_Balance']) else 0
+        elif 'Balance' in df1.columns:
+            rb1 = row1['Balance'] if pd.notna(row1['Balance']) else 0
+        
+        if 'Running_Balance' in df2.columns:
             rb2 = row2['Running_Balance'] if pd.notna(row2['Running_Balance']) else 0
-            if abs(rb1 - rb2) > 0.01:
-                row_diff['Running_Balance'] = f"{rb1} != {rb2}"
+        elif 'Balance' in df2.columns:
+            rb2 = row2['Balance'] if pd.notna(row2['Balance']) else 0
+        
+        if rb1 is not None and rb2 is not None and abs(rb1 - rb2) > 0.01:
+            row_diff['Running_Balance'] = f"{rb1} != {rb2}"
         
         if row_diff:
             row_diff['row_index'] = idx
@@ -685,6 +717,126 @@ def test_cibc(pdf_path: str, verbose: bool = False):
     return all_match
 
 
+def test_rbc_mastercard(pdf_path: str, verbose: bool = False):
+    """Test RBC Mastercard extraction"""
+    if verbose:
+        print("\n" + "="*80)
+        print("TESTING RBC MASTERCARD EXTRACTION")
+        print("="*80)
+        print(f"PDF: {Path(pdf_path).name}\n")
+    
+    # Original extraction
+    if verbose:
+        print("1. Running original extraction (test_rbc_mastercard_complete.py logic)...")
+    try:
+        from test_rbc_mastercard_complete import extract_rbc_mastercard_statement
+        df_original, opening_orig, closing_orig, year_orig = extract_rbc_mastercard_statement(pdf_path)
+        if verbose:
+            print(f"   ✅ Original: {len(df_original)} transactions")
+            print(f"   Opening: ${opening_orig:,.2f}" if opening_orig else "   Opening: Not found")
+            print(f"   Closing: ${closing_orig:,.2f}" if closing_orig else "   Closing: Not found")
+    except Exception as e:
+        if verbose:
+            print(f"   ❌ Error: {e}")
+            import traceback
+            traceback.print_exc()
+        return False
+    
+    # Standardized extraction
+    if verbose:
+        print("\n2. Running standardized extraction...")
+    try:
+        result = extract_bank_statement(pdf_path)
+        if not result.success:
+            if verbose:
+                print(f"   ❌ Error: {result.error}")
+            return False
+        
+        df_standardized = result.df
+        opening_std = result.metadata.get('opening_balance')
+        closing_std = result.metadata.get('closing_balance')
+        
+        if verbose:
+            print(f"   ✅ Standardized: {len(df_standardized)} transactions")
+            print(f"   Opening: ${opening_std:,.2f}" if opening_std else "   Opening: Not found")
+            print(f"   Closing: ${closing_std:,.2f}" if closing_std else "   Closing: Not found")
+    except Exception as e:
+        if verbose:
+            print(f"   ❌ Error: {e}")
+            import traceback
+            traceback.print_exc()
+        return False
+    
+    # Compare
+    if verbose:
+        print("\n3. Comparing results...")
+    
+    opening_match = (opening_orig is None and opening_std is None) or (opening_orig is not None and opening_std is not None and abs(opening_orig - opening_std) < 0.01)
+    closing_match = (closing_orig is None and closing_std is None) or (closing_orig is not None and closing_std is not None and abs(closing_orig - closing_std) < 0.01)
+    
+    differences = compare_dataframes(df_original, df_standardized, "Original", "Standardized")
+    
+    # Print comparison results (similar to other test functions)
+    if verbose:
+        print(f"   Opening balance match: {'✅' if opening_match else '❌'}")
+        if not opening_match:
+            print(f"      Original: ${opening_orig:,.2f}" if opening_orig else "      Original: None")
+            print(f"      Standardized: ${opening_std:,.2f}" if opening_std else "      Standardized: None")
+        
+        print(f"   Closing balance match: {'✅' if closing_match else '❌'}")
+        if not closing_match:
+            print(f"      Original: ${closing_orig:,.2f}" if closing_orig else "      Original: None")
+            print(f"      Standardized: ${closing_std:,.2f}" if closing_std else "      Standardized: None")
+        
+        print(f"   Transaction count match: {'✅' if differences['row_count_match'] else '❌'}")
+        if not differences['row_count_match']:
+            print(f"      Original: {len(df_original)} transactions")
+            print(f"      Standardized: {len(df_standardized)} transactions")
+        
+        print(f"   Column match: {'✅' if differences['column_match'] else '❌'}")
+        if not differences['column_match']:
+            if differences['missing_columns']:
+                print(f"      Missing in standardized: {differences['missing_columns']}")
+            if differences['extra_columns']:
+                print(f"      Extra in standardized: {differences['extra_columns']}")
+        
+        if differences['transaction_differences']:
+            print(f"   ⚠️  Found {len(differences['transaction_differences'])} transaction differences:")
+            for diff in differences['transaction_differences'][:5]:
+                print(f"      Row {diff['row_index']}: {diff}")
+            if len(differences['transaction_differences']) > 5:
+                print(f"      ... and {len(differences['transaction_differences']) - 5} more")
+        else:
+            print(f"   ✅ All transactions match!")
+    else:
+        # Brief summary for non-verbose mode
+        if not opening_match or not closing_match or not differences['row_count_match'] or differences['transaction_differences']:
+            print(f"   ❌ FAIL - ", end="")
+            issues = []
+            if not opening_match:
+                issues.append("opening balance mismatch")
+            if not closing_match:
+                issues.append("closing balance mismatch")
+            if not differences['row_count_match']:
+                issues.append(f"transaction count mismatch ({len(df_original)} vs {len(df_standardized)})")
+            if differences['transaction_differences']:
+                issues.append(f"{len(differences['transaction_differences'])} transaction differences")
+            print(", ".join(issues))
+        else:
+            print(f"   ✅ PASS - {len(df_original)} transactions, balances match")
+    
+    # Overall result
+    all_match = (
+        opening_match and 
+        closing_match and 
+        differences['row_count_match'] and 
+        differences['column_match'] and 
+        len(differences['transaction_differences']) == 0
+    )
+    
+    return all_match
+
+
 def test_rbc_chequing(pdf_path: str, verbose: bool = False):
     """Test RBC Chequing extraction"""
     if verbose:
@@ -1058,6 +1210,14 @@ def test_nb(pdf_path: str, verbose: bool = False):
 
 def main():
     """Run tests on all files in each folder"""
+    # Ensure stdout is available
+    if sys.platform == 'win32':
+        try:
+            if hasattr(sys.stdout, 'closed') and sys.stdout.closed:
+                sys.stdout = sys.__stdout__
+        except:
+            pass
+    
     # Parse command-line arguments
     parser = argparse.ArgumentParser(
         description='Test standardized extractors against original extraction scripts',
@@ -1088,7 +1248,8 @@ Examples:
     parser.add_argument('--cibc', action='store_true', help='Test CIBC Bank (both CAD and USD)')
     parser.add_argument('--nb', action='store_true', help='Test National Bank (both CAD and USD)')
     parser.add_argument('--nb-cc', action='store_true', help='Test NB Company Credit Card')
-    parser.add_argument('--rbc', action='store_true', help='Test RBC Chequing extractor')
+    parser.add_argument('--rbc', action='store_true', help='Test RBC extractors (Chequing and Mastercard)')
+    parser.add_argument('--rbc-mastercard', action='store_true', help='Test RBC Mastercard extractor only')
     
     # Other options
     parser.add_argument('--verbose', '-v', action='store_true', help='Verbose output for each test')
@@ -1171,6 +1332,12 @@ Examples:
             'flag': 'rbc'
         },
         {
+            'name': 'RBC Mastercard - 2364',
+            'folder': Path("data/RBC Mastercard 2364 Jan 10, 2025 - Dec 10, 2025"),
+            'test_func': test_rbc_mastercard,
+            'flag': 'rbc'
+        },
+        {
             'name': 'RBC - Old Format',
             'folder': Path("data/RBC"),
             'test_func': test_rbc_chequing,
@@ -1188,7 +1355,7 @@ Examples:
         return
     
     # Filter test configs based on flags
-    if any([args.td_bank, args.td_visa, args.scotia, args.tangerine, args.cibc, args.nb, args.nb_cc, args.rbc]):
+    if any([args.td_bank, args.td_visa, args.scotia, args.tangerine, args.cibc, args.nb, args.nb_cc, args.rbc, args.rbc_mastercard]):
         # User specified specific tests
         test_configs = []
         if args.td_bank:
@@ -1205,9 +1372,10 @@ Examples:
             test_configs.extend([c for c in all_test_configs if c['flag'] == 'nb'])
         if args.nb_cc:
             test_configs.extend([c for c in all_test_configs if c['flag'] == 'nb-cc'])
-        if args.rbc:
-            test_configs.extend([c for c in all_test_configs if c['flag'] == 'rbc'])
-        elif 'rbc' in args or '--rbc' in sys.argv:
+        if args.rbc_mastercard:
+            # Test only RBC Mastercard
+            test_configs.extend([c for c in all_test_configs if 'Mastercard' in c['name']])
+        elif args.rbc:
             test_configs.extend([c for c in all_test_configs if c['flag'] == 'rbc'])
     else:
         # No flags specified, run all tests
