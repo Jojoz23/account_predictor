@@ -17,6 +17,7 @@ from .rbc_chequing_extractor import RBCChequingExtractor
 from .rbc_mastercard_extractor import RBCMastercardExtractor
 from .bmo_bank_extractor import BMOBankExtractor
 from .bmo_credit_card_extractor import BMOCreditCardExtractor
+from .amex_extractor import AMEXExtractor
 from .generic_extractor import GenericExtractor
 
 __all__ = [
@@ -35,5 +36,6 @@ __all__ = [
     'RBCMastercardExtractor',
     'BMOBankExtractor',
     'BMOCreditCardExtractor',
+    'AMEXExtractor',
     'GenericExtractor',
 ]

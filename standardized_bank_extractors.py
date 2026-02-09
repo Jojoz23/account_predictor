@@ -175,6 +175,7 @@ from extractors import (
     NBBankExtractor,
     NBCompanyCCExtractor,
     BMOBankExtractor,
+    AMEXExtractor,
     GenericExtractor,
 )
 
@@ -194,6 +195,7 @@ __all__ = [
     'extract_cibc_bank_statement',
     'NBBankExtractor',
     'NBCompanyCCExtractor',
+    'AMEXExtractor',
     'GenericExtractor',
     'BankExtractorOrchestrator',
     'extract_bank_statement',
@@ -234,6 +236,7 @@ class BankExtractorOrchestrator:
             NBCompanyCCExtractor(),  # Check NB Company Credit Card before NB Bank
             RBCMastercardExtractor(), # RBC Mastercard (before RBC Chequing)
             BMOCreditCardExtractor(), # BMO Credit Card (before BMO Bank)
+            AMEXExtractor(),          # AMEX (Platinum Card / Amex Bank of Canada)
             RBCChequingExtractor(), # RBC Chequing (before other RBC products)
             TangerineExtractor(),   # Tangerine Bank (before Scotiabank to avoid false matches)
             TDBankExtractor(),
@@ -289,6 +292,8 @@ class BankExtractorOrchestrator:
         elif ('rbc' in bank_lower or 'royal bank' in bank_lower) and ('chequing' in bank_lower or 'business account' in bank_lower):
             from extractors.rbc_chequing_extractor import RBCChequingExtractor
             return RBCChequingExtractor()
+        elif 'amex' in bank_lower or 'american express' in bank_lower:
+            return AMEXExtractor()
         else:
             return GenericExtractor()
 
