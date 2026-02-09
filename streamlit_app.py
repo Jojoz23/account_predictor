@@ -5,11 +5,11 @@ HOW THIS APP WORKS:
 ==================
 
 1. USER UPLOADS PDFs
-   - You drag & drop bank statement PDFs (RBC, TD, BMO, Scotiabank, CIBC)
+   - You drag & drop bank statement PDFs (RBC, TD, BMO, Scotiabank, CIBC, Tangerine, National Bank, AMEX)
    - Can upload single file or multiple files at once
 
 2. EXTRACTION (standardized_bank_extractors.py)
-   - Uses bank-specific extractors (TD, Scotia, Tangerine, CIBC, NB, RBC, BMO)
+   - Uses bank-specific extractors (TD, Scotia, Tangerine, CIBC, NB, RBC, BMO, AMEX)
    - Detects which bank from the PDF content
    - Extracts all transactions: Date, Description, Amount
    - Handles multi-line descriptions, deduplication, date parsing
@@ -96,7 +96,7 @@ if 'file_order' not in st.session_state:
 def main():
     # Header
     st.title("Bookeepifier")
-    st.markdown("Upload PDF bank statements (RBC, TD, BMO, Scotiabank, CIBC) → AI categorizes transactions → Download Excel & QuickBooks files")
+    st.markdown("Upload PDF bank statements (RBC, TD, BMO, Scotiabank, CIBC, Tangerine, National Bank, AMEX) → AI categorizes transactions → Download Excel & QuickBooks files")
     
     st.divider()
     
@@ -113,7 +113,7 @@ def main():
         "Drag and drop PDF files here (or click to browse)",
         type=['pdf'],
         accept_multiple_files=True,
-        help="Supports RBC, TD, BMO, Scotiabank, CIBC • Upload multiple files at once",
+        help="Supports RBC, TD, BMO, Scotiabank, CIBC, Tangerine, National Bank, AMEX • Upload multiple files at once",
         key=uploader_key
     )
     
@@ -212,7 +212,7 @@ def main():
         st.divider()
         st.info("Upload PDF bank statements above to get started")
         st.markdown("""
-        **Supported Banks:** RBC, TD, BMO, Scotiabank, CIBC  
+        **Supported Banks:** RBC, TD, BMO, Scotiabank, CIBC, Tangerine, National Bank, AMEX (bank & credit card statements)  
         **Features:** AI-powered transaction categorization, Excel & QuickBooks export  
         **Drag & Drop:** You can drop files anywhere on this page
         """)
