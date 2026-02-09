@@ -1441,6 +1441,124 @@ def test_bmo_credit_card(pdf_path: str, verbose: bool = False):
     return all_match
 
 
+def test_amex(pdf_path: str, verbose: bool = False):
+    """Test AMEX (Amex Bank of Canada / Platinum Card) extraction"""
+    if verbose:
+        print("\n" + "="*80)
+        print("TESTING AMEX EXTRACTION")
+        print("="*80)
+        print(f"PDF: {Path(pdf_path).name}\n")
+    
+    # Original extraction (complete script)
+    if verbose:
+        print("1. Running original extraction (test_amex_complete.py)...")
+    try:
+        from test_amex_complete import extract_amex_statement
+        df_original, opening_orig, closing_orig, year_orig = extract_amex_statement(pdf_path)
+        
+        if df_original is None or len(df_original) == 0:
+            if verbose:
+                print(f"   ❌ Error: Extraction returned no transactions")
+            return False
+        
+        if verbose:
+            print(f"   ✅ Original: {len(df_original)} transactions")
+            print(f"   Opening: ${opening_orig:,.2f}" if opening_orig is not None else "   Opening: Not found")
+            print(f"   Closing: ${closing_orig:,.2f}" if closing_orig is not None else "   Closing: Not found")
+    except Exception as e:
+        if verbose:
+            print(f"   ❌ Error: {e}")
+            import traceback
+            traceback.print_exc()
+        return False
+    
+    # Standardized extraction
+    if verbose:
+        print("\n2. Running standardized extraction...")
+    try:
+        from standardized_bank_extractors import extract_bank_statement
+        result = extract_bank_statement(pdf_path)
+        if not result.success:
+            if verbose:
+                print(f"   ❌ Error: {result.error}")
+            return False
+        
+        df_standardized = result.df
+        opening_std = result.metadata.get('opening_balance')
+        closing_std = result.metadata.get('closing_balance')
+        
+        if verbose:
+            print(f"   ✅ Standardized: {len(df_standardized)} transactions")
+            print(f"   Opening: ${opening_std:,.2f}" if opening_std is not None else "   Opening: Not found")
+            print(f"   Closing: ${closing_std:,.2f}" if closing_std is not None else "   Closing: Not found")
+    except Exception as e:
+        if verbose:
+            print(f"   ❌ Error: {e}")
+            import traceback
+            traceback.print_exc()
+        return False
+    
+    # Compare results
+    differences = compare_dataframes(df_original, df_standardized, "Original", "Standardized")
+    
+    opening_match = (
+        (opening_orig is None and opening_std is None) or
+        (opening_orig is not None and opening_std is not None and abs(opening_orig - opening_std) < 0.01)
+    )
+    closing_match = (
+        (closing_orig is None and closing_std is None) or
+        (closing_orig is not None and closing_std is not None and abs(closing_orig - closing_std) < 0.01)
+    )
+    
+    if verbose:
+        print("\n3. Comparison Results:")
+        print(f"   Opening balance match: {'✅' if opening_match else '❌'}")
+        if not opening_match:
+            print(f"      Original: ${opening_orig:,.2f}" if opening_orig is not None else "      Original: None")
+            print(f"      Standardized: ${opening_std:,.2f}" if opening_std is not None else "      Standardized: None")
+        
+        print(f"   Closing balance match: {'✅' if closing_match else '❌'}")
+        if not closing_match:
+            print(f"      Original: ${closing_orig:,.2f}" if closing_orig is not None else "      Original: None")
+            print(f"      Standardized: ${closing_std:,.2f}" if closing_std is not None else "      Standardized: None")
+        
+        print(f"   Transaction count match: {'✅' if differences['row_count_match'] else '❌'}")
+        if not differences['row_count_match']:
+            print(f"      Original: {len(df_original)} transactions")
+            print(f"      Standardized: {len(df_standardized)} transactions")
+        
+        if differences['transaction_differences']:
+            print(f"   ⚠️  Found {len(differences['transaction_differences'])} transaction differences:")
+            for diff in differences['transaction_differences'][:5]:
+                print(f"      Row {diff['row_index']}: {diff}")
+        else:
+            print(f"   ✅ All transactions match!")
+    else:
+        if not opening_match or not closing_match or not differences['row_count_match'] or differences['transaction_differences']:
+            print(f"   ❌ FAIL - ", end="")
+            issues = []
+            if not opening_match:
+                issues.append("opening balance mismatch")
+            if not closing_match:
+                issues.append("closing balance mismatch")
+            if not differences['row_count_match']:
+                issues.append(f"transaction count mismatch ({len(df_original)} vs {len(df_standardized)})")
+            if differences['transaction_differences']:
+                issues.append(f"{len(differences['transaction_differences'])} transaction differences")
+            print(", ".join(issues))
+        else:
+            print(f"   ✅ PASS - {len(df_original)} transactions, balances match")
+    
+    all_match = (
+        opening_match and
+        closing_match and
+        differences['row_count_match'] and
+        len(differences['transaction_differences']) == 0
+    )
+    
+    return all_match
+
+
 def main():
     """Run tests on all files in each folder"""
     # Ensure stdout is available
@@ -1486,6 +1604,7 @@ Examples:
     parser.add_argument('--bmo', action='store_true', help='Test BMO extractors (Bank and Credit Card)')
     parser.add_argument('--bmo-bank', action='store_true', help='Test BMO Bank extractor only')
     parser.add_argument('--bmo-cc', action='store_true', help='Test BMO Credit Card extractor only')
+    parser.add_argument('--amex', action='store_true', help='Test AMEX extractor only')
     
     # Other options
     parser.add_argument('--verbose', '-v', action='store_true', help='Verbose output for each test')
@@ -1602,6 +1721,12 @@ Examples:
             'folder': Path("data/BMO Credit Card 2589"),
             'test_func': test_bmo_credit_card,
             'flag': 'bmo'
+        },
+        {
+            'name': 'AMEX (Shawafy Inc. AMEX Credit Card)',
+            'folder': Path("data/Shawafy Inc. AMEX Credit Card"),
+            'test_func': test_amex,
+            'flag': 'amex'
         }
     ]
     
@@ -1615,7 +1740,7 @@ Examples:
         return
     
     # Filter test configs based on flags
-    if any([args.td_bank, args.td_visa, args.scotia, args.tangerine, args.cibc, args.nb, args.nb_cc, args.rbc, args.rbc_mastercard, args.bmo, args.bmo_bank, args.bmo_cc]):
+    if any([args.td_bank, args.td_visa, args.scotia, args.tangerine, args.cibc, args.nb, args.nb_cc, args.rbc, args.rbc_mastercard, args.bmo, args.bmo_bank, args.bmo_cc, args.amex]):
         # User specified specific tests
         test_configs = []
         if args.td_bank:
@@ -1645,6 +1770,8 @@ Examples:
             test_configs.extend([c for c in all_test_configs if 'BMO Credit Card' in c['name']])
         elif args.bmo:
             test_configs.extend([c for c in all_test_configs if c['flag'] == 'bmo'])
+        if args.amex:
+            test_configs.extend([c for c in all_test_configs if c['flag'] == 'amex'])
     else:
         # No flags specified, run all tests
         test_configs = all_test_configs
