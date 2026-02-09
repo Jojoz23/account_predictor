@@ -26,17 +26,24 @@ class PDFToQuickBooks:
     Complete pipeline: Extract PDF → Predict Accounts → Export for QuickBooks
     """
     
-    def __init__(self, model_path='models/neural_network_account_predictor.pkl'):
+    def __init__(self, model_path='models/neural_network_account_predictor.pkl', quiet=False):
         """
         Initialize the pipeline with trained model
         
         Parameters:
         - model_path: Path to the trained neural network model
+        - quiet: If True, skip print() (e.g. when used from Streamlit where stdout may be closed)
         """
-        print("🚀 BANK STATEMENT PDF TO QUICKBOOKS PIPELINE")
-        print("="*70)
-        print("\n📦 Loading AI model...")
-        
+        self._quiet = bool(quiet)
+
+        def _log(*args, **kwargs):
+            if not self._quiet:
+                print(*args, **kwargs)
+
+        _log("🚀 BANK STATEMENT PDF TO QUICKBOOKS PIPELINE")
+        _log("="*70)
+        _log("\n📦 Loading AI model...")
+
         try:
             model_package = joblib.load(model_path)
             self.model = model_package['model']
@@ -46,15 +53,15 @@ class PDFToQuickBooks:
             self.basic_features = model_package['feature_columns']
             self.class_names = model_package['class_names']
             self.feature_columns_full = model_package['feature_columns_full']
-            print(f"✅ Model loaded successfully!")
-            print(f"   Trained on {len(self.class_names)} account categories")
+            _log(f"✅ Model loaded successfully!")
+            _log(f"   Trained on {len(self.class_names)} account categories")
         except FileNotFoundError:
-            print("❌ Model file not found!")
-            print("   Please run the neural network training notebook first:")
-            print("   notebooks/03_neural_network_training.ipynb")
+            _log("❌ Model file not found!")
+            _log("   Please run the neural network training notebook first:")
+            _log("   notebooks/03_neural_network_training.ipynb")
             raise
         except Exception as e:
-            print(f"❌ Error loading model: {e}")
+            _log(f"❌ Error loading model: {e}")
             raise
     
     def clean_text(self, text):
@@ -552,7 +559,7 @@ class PDFToQuickBooks:
         
         return df, was_credit_card
     
-    def save_to_excel(self, df, output_path, is_credit_card=False):
+    def save_to_excel(self, df, output_path, is_credit_card=False, opening_balance=None, closing_balance=None):
         """
         Save to Excel with formatted sheets
         
@@ -560,6 +567,8 @@ class PDFToQuickBooks:
         - df: DataFrame with predictions
         - output_path: Path to save Excel file
         - is_credit_card: If True, invert amounts back to credit card format for display
+        - opening_balance: Optional opening balance from statement (used for running total if Running_Balance missing)
+        - closing_balance: Optional closing balance from statement (shown in Summary sheet)
         """
         # If Running_Balance is missing, attempt to merge from last extracted frame
         if 'Running_Balance' not in df.columns and hasattr(self, '_last_extracted_df') and isinstance(self._last_extracted_df, pd.DataFrame):
@@ -629,17 +638,19 @@ class PDFToQuickBooks:
         # Compute Amount as shown in Excel (respect credit-card inversion)
         amt_display = -df['Amount'] if is_credit_card else df['Amount']
         
-        # Calculate running total
-        # For credit cards: Use Running_Balance from extractor if available (starts from opening balance)
-        # Otherwise calculate from amounts
+        # Calculate running total (must tie to opening balance so last row = closing)
+        # Use Running_Balance from extractor when available; else opening_balance + cumsum when provided
         if is_credit_card and 'Running_Balance' in df.columns:
-            # Use the Running_Balance from extractor (already includes opening balance)
-            # It's in the same format as displayed amounts (charges positive, payments negative)
             running_total = df['Running_Balance'].copy()
+        elif is_credit_card and opening_balance is not None:
+            running_total = float(opening_balance) + amt_display.cumsum()
         else:
-            # Running total should follow the same sign convention as displayed Amount
-            # If multiple source files are combined, keep separate running totals per source file
-            if 'Source_File' in df.columns:
+            # Bank: use Running_Balance from df, or opening_balance + cumsum (single file), or per-file cumsum
+            if 'Running_Balance' in df.columns:
+                running_total = df['Running_Balance'].copy()
+            elif opening_balance is not None and 'Source_File' not in df.columns:
+                running_total = float(opening_balance) + amt_display.cumsum()
+            elif 'Source_File' in df.columns:
                 running_total = amt_display.groupby(df['Source_File']).cumsum()
             else:
                 running_total = amt_display.cumsum()
@@ -722,6 +733,10 @@ class PDFToQuickBooks:
                 'Medium Confidence (50-80%)': [f"{((df['Confidence'] > 0.5) & (df['Confidence'] <= 0.8)).sum()}"],
                 'Low Confidence (<50%)': [f"{(df['Confidence'] <= 0.5).sum()}"],
             }
+            if opening_balance is not None:
+                summary_data['Opening Balance'] = [f"${float(opening_balance):,.2f}"]
+            if closing_balance is not None:
+                summary_data['Closing Balance'] = [f"${float(closing_balance):,.2f}"]
             
             # Add note for credit card statements
             if is_credit_card:

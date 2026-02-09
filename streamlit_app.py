@@ -8,8 +8,8 @@ HOW THIS APP WORKS:
    - You drag & drop bank statement PDFs (RBC, TD, BMO, Scotiabank, CIBC)
    - Can upload single file or multiple files at once
 
-2. EXTRACTION (extract_bank_statements.py)
-   - Reads PDF using Camelot (table extraction) and pdfplumber (text extraction)
+2. EXTRACTION (standardized_bank_extractors.py)
+   - Uses bank-specific extractors (TD, Scotia, Tangerine, CIBC, NB, RBC, BMO)
    - Detects which bank from the PDF content
    - Extracts all transactions: Date, Description, Amount
    - Handles multi-line descriptions, deduplication, date parsing
@@ -40,10 +40,12 @@ KEY FEATURES:
 import streamlit as st
 import pandas as pd
 import os
+import sys
 import tempfile
+import contextlib
 from pathlib import Path
 from pdf_to_quickbooks import PDFToQuickBooks
-from extract_bank_statements import extract_from_pdf
+from standardized_bank_extractors import extract_bank_statement
 import zipfile
 import io
 
@@ -227,7 +229,10 @@ def process_files(uploaded_files, is_credit_card, is_batch_mode):
     # Initialize pipeline
     with st.spinner("Loading AI model..."):
         try:
-            pipeline = PDFToQuickBooks()
+            # Redirect stdout/stderr during load so Streamlit's closed streams don't cause "I/O operation on closed file"
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+                pipeline = PDFToQuickBooks(quiet=True)
         except Exception as e:
             st.error(f"Error loading AI model: {e}")
             return
@@ -259,10 +264,30 @@ def process_files(uploaded_files, is_credit_card, is_batch_mode):
             status_text.text(f"Processing {pdf_path.name}... ({idx + 1}/{len(pdf_paths)})")
             
             try:
-                # Process the PDF (auto-detect credit card)
+                # Extract with standardized bank extractors, then predict + save (same pipeline as process_to_excel)
                 with st.spinner(f"Extracting and categorizing {pdf_path.name}..."):
-                    df = pipeline.process_pdf(str(pdf_path), is_credit_card=None)  # Auto-detect credit card
-                    
+                    result = extract_bank_statement(str(pdf_path))
+                    if not result.success:
+                        st.error(f"❌ {pdf_path.name}: Extraction failed - {result.error}")
+                        continue
+                    df_extracted = result.df.copy()
+                    if df_extracted is None or len(df_extracted) == 0:
+                        st.error(f"❌ {pdf_path.name}: No transactions found")
+                        continue
+                    # Ensure Running_Balance ties to opening balance (like process_to_excel)
+                    opening = result.metadata.get('opening_balance')
+                    if opening is not None and 'Running_Balance' not in df_extracted.columns:
+                        if 'Withdrawals' in df_extracted.columns and 'Deposits' in df_extracted.columns:
+                            w = pd.to_numeric(df_extracted['Withdrawals'], errors='coerce').fillna(0)
+                            d = pd.to_numeric(df_extracted['Deposits'], errors='coerce').fillna(0)
+                            df_extracted['Running_Balance'] = float(opening) + (d - w).cumsum()
+                        elif 'Amount' in df_extracted.columns:
+                            amt = pd.to_numeric(df_extracted['Amount'], errors='coerce').fillna(0)
+                            df_extracted['Running_Balance'] = float(opening) + amt.cumsum()
+                    pipeline._last_extracted_df = df_extracted
+                    df_std, _ = pipeline._convert_to_standard_format(df_extracted, is_credit_card=None)
+                    df = pipeline.predict_accounts(df_std)
+
                     if df is not None and len(df) > 0:
                         # Detect if this is a credit card from the dataframe structure
                         # Credit cards have 'Amount' column, bank accounts have 'Withdrawals'/'Deposits'
@@ -272,8 +297,12 @@ def process_files(uploaded_files, is_credit_card, is_batch_mode):
                         excel_buffer = io.BytesIO()
                         iif_buffer = io.StringIO()
                         
-                        # Use pipeline's save_to_excel method (handles credit cards automatically)
-                        pipeline.save_to_excel(df, excel_buffer, is_credit_card=is_credit_card)
+                        # Use pipeline's save_to_excel (Option A: pass opening/closing so Excel has correct running balance + Summary)
+                        pipeline.save_to_excel(
+                            df, excel_buffer, is_credit_card=is_credit_card,
+                            opening_balance=result.metadata.get('opening_balance'),
+                            closing_balance=result.metadata.get('closing_balance')
+                        )
                         excel_buffer.seek(0)
                         excel_data = excel_buffer.read()
                         
@@ -284,7 +313,7 @@ def process_files(uploaded_files, is_credit_card, is_batch_mode):
                         # Add source file to dataframe for batch mode
                         df['Source_File'] = pdf_path.name
                         
-                        # Store results with file data in memory
+                        # Store results with file data in memory (include balances for verification)
                         all_results.append({
                             'filename': pdf_path.name,
                             'transactions': len(df),
@@ -293,7 +322,9 @@ def process_files(uploaded_files, is_credit_card, is_batch_mode):
                             'iif_data': iif_data,
                             'high_confidence': (df['Confidence'] > 0.8).sum(),
                             'medium_confidence': ((df['Confidence'] > 0.5) & (df['Confidence'] <= 0.8)).sum(),
-                            'low_confidence': (df['Confidence'] <= 0.5).sum()
+                            'low_confidence': (df['Confidence'] <= 0.5).sum(),
+                            'opening_balance': result.metadata.get('opening_balance'),
+                            'closing_balance': result.metadata.get('closing_balance'),
                         })
                         
                         st.success(f"✅ {pdf_path.name}: {len(df)} transactions processed")
@@ -373,6 +404,28 @@ def show_results():
         # Combine all dataframes
         combined_df = pd.concat([r['dataframe'] for r in st.session_state.processed_files], ignore_index=True)
         
+        # Balance verification (per file): opening/closing from PDF; running total from transactions; Match = last row equals statement closing
+        if any(r.get('closing_balance') is not None for r in st.session_state.processed_files):
+            st.subheader("Balance verification")
+            st.caption("Opening and closing balances come from the PDF. **Running total** is computed from transactions. **Match ✓** means the last row’s running total equals the statement closing balance (within $0.02).")
+            balance_rows = []
+            for r in st.session_state.processed_files:
+                df_f = r['dataframe']
+                last_bal = float(df_f['Running_Balance'].iloc[-1]) if 'Running_Balance' in df_f.columns and len(df_f) else None
+                closing = r.get('closing_balance')
+                opening = r.get('opening_balance')
+                if closing is not None and last_bal is not None:
+                    match = abs(last_bal - float(closing)) < 0.02
+                    balance_rows.append({
+                        'File': r['filename'],
+                        'Opening': f"${float(opening):,.2f}" if opening is not None else "—",
+                        'Closing (statement)': f"${float(closing):,.2f}",
+                        'Last row running total': f"${last_bal:,.2f}",
+                        'Match': "✓ Yes" if match else "✗ No"
+                    })
+            if balance_rows:
+                st.dataframe(pd.DataFrame(balance_rows), use_container_width=True, hide_index=True)
+        
         # Display combined transactions
         st.subheader("All Transactions (Combined)")
         
@@ -382,16 +435,13 @@ def show_results():
         if 'Date' in df_display.columns:
             df_display['Date'] = pd.to_datetime(df_display['Date']).dt.strftime('%Y-%m-%d')
         
-        # Create Debit and Deposit columns for display
-        # Check if this is credit card format (has Amount, no Withdrawals/Deposits)
-        if 'Amount' in df_display.columns and 'Withdrawals' not in df_display.columns:
-            # Credit card format - create display columns from Amount
-            df_display['Withdrawals'] = df_display['Amount'].apply(lambda x: f"${abs(x):,.2f}" if x < 0 else '')
-            df_display['Deposits'] = df_display['Amount'].apply(lambda x: f"${x:,.2f}" if x > 0 else '')
-        elif 'Withdrawals' not in df_display.columns:
-            # Bank account format - create from Amount if needed
-            df_display['Withdrawals'] = df_display['Amount'].apply(lambda x: f"${abs(x):,.2f}" if x < 0 else '')
-            df_display['Deposits'] = df_display['Amount'].apply(lambda x: f"${x:,.2f}" if x > 0 else '')
+        # Match process_to_excel Excel layout: Debit, Deposit, Running Total (same column names as downloaded Excel)
+        if 'Running_Balance' in df_display.columns:
+            df_display['Running Total'] = df_display['Running_Balance'].apply(lambda x: f"${float(x):,.2f}" if pd.notna(x) else "")
+        # Bank: Debit / Deposit columns (credit card keeps single Amount in Excel; here we still split for display)
+        if 'Amount' in df_display.columns:
+            df_display['Debit'] = df_display['Amount'].apply(lambda x: f"${abs(x):,.2f}" if x < 0 else "")
+            df_display['Deposit'] = df_display['Amount'].apply(lambda x: f"${x:,.2f}" if x > 0 else "")
         
         # Format confidence as percentage
         df_display['Confidence'] = df_display['Confidence'].apply(lambda x: f"{x:.1%}")
@@ -408,8 +458,8 @@ def show_results():
         
         df_display['Confidence Level'] = df_display['Confidence'].apply(get_confidence_indicator)
         
-        # Select columns to display (include Source_File for batch mode)
-        display_cols = ['Confidence Level', 'Source_File', 'Date', 'Description', 'Account', 'Withdrawals', 'Deposits', 'Confidence']
+        # Column order like process_to_excel: Date, Description, Account, Debit, Deposit, Running Total, Confidence
+        display_cols = ['Confidence Level', 'Source_File', 'Date', 'Description', 'Account', 'Debit', 'Deposit', 'Running Total', 'Confidence']
         display_cols = [col for col in display_cols if col in df_display.columns]
         
         # Dataframe with colored confidence indicators
@@ -448,7 +498,7 @@ def show_results():
         
         # Create combined Excel
         combined_excel_buffer = io.BytesIO()
-        pipeline = PDFToQuickBooks()
+        pipeline = PDFToQuickBooks(quiet=True)
         # Detect if combined data is credit card (has Amount column, no Withdrawals/Deposits)
         combined_is_credit_card = 'Amount' in combined_df.columns and 'Withdrawals' not in combined_df.columns
         pipeline.save_to_excel(combined_df, combined_excel_buffer, is_credit_card=combined_is_credit_card)
@@ -496,6 +546,25 @@ def show_results():
         with col4:
             st.metric("Low Confidence", f"{result['low_confidence']} ({result['low_confidence']/result['transactions']*100:.1f}%)")
         
+        # Balance verification (single file): opening/closing from PDF; Match = last row running total equals statement closing
+        opening = result.get('opening_balance')
+        closing = result.get('closing_balance')
+        df_res = result['dataframe']
+        last_bal = float(df_res['Running_Balance'].iloc[-1]) if 'Running_Balance' in df_res.columns and len(df_res) else None
+        if closing is not None or last_bal is not None:
+            match = (last_bal is not None and closing is not None and abs(last_bal - float(closing)) < 0.02)
+            parts = []
+            if opening is not None:
+                parts.append(f"Opening: ${float(opening):,.2f}")
+            if closing is not None:
+                parts.append(f"Closing (statement): ${float(closing):,.2f}")
+            if last_bal is not None:
+                parts.append(f"Last row running total: ${last_bal:,.2f}")
+            if closing is not None and last_bal is not None:
+                parts.append(f"Match: {'✓ Yes' if match else '✗ No'}")
+            if parts:
+                st.caption("**Balance:**  " + "  |  ".join(parts) + " — *Opening/closing from PDF; running total from transactions. Match ✓ = last row equals statement closing (within $0.02).*")
+        
         # Display transactions
         st.subheader("Transaction Details")
         
@@ -505,16 +574,12 @@ def show_results():
         if 'Date' in df_display.columns:
             df_display['Date'] = pd.to_datetime(df_display['Date']).dt.strftime('%Y-%m-%d')
         
-        # Create Debit and Deposit columns for display
-        # Check if this is credit card format (has Amount, no Withdrawals/Deposits)
-        if 'Amount' in df_display.columns and 'Withdrawals' not in df_display.columns:
-            # Credit card format - create display columns from Amount
-            df_display['Withdrawals'] = df_display['Amount'].apply(lambda x: f"${abs(x):,.2f}" if x < 0 else '')
-            df_display['Deposits'] = df_display['Amount'].apply(lambda x: f"${x:,.2f}" if x > 0 else '')
-        elif 'Withdrawals' not in df_display.columns:
-            # Bank account format - create from Amount if needed
-            df_display['Withdrawals'] = df_display['Amount'].apply(lambda x: f"${abs(x):,.2f}" if x < 0 else '')
-            df_display['Deposits'] = df_display['Amount'].apply(lambda x: f"${x:,.2f}" if x > 0 else '')
+        # Match process_to_excel Excel layout: Debit, Deposit, Running Total
+        if 'Running_Balance' in df_display.columns:
+            df_display['Running Total'] = df_display['Running_Balance'].apply(lambda x: f"${float(x):,.2f}" if pd.notna(x) else "")
+        if 'Amount' in df_display.columns:
+            df_display['Debit'] = df_display['Amount'].apply(lambda x: f"${abs(x):,.2f}" if x < 0 else "")
+            df_display['Deposit'] = df_display['Amount'].apply(lambda x: f"${x:,.2f}" if x > 0 else "")
         
         # Format confidence as percentage
         df_display['Confidence'] = df_display['Confidence'].apply(lambda x: f"{x:.1%}")
@@ -531,8 +596,8 @@ def show_results():
         
         df_display['Confidence Level'] = df_display['Confidence'].apply(get_confidence_indicator)
         
-        # Select columns to display (no Source_File for single mode)
-        display_cols = ['Confidence Level', 'Date', 'Description', 'Account', 'Withdrawals', 'Deposits', 'Confidence']
+        # Column order like process_to_excel: Date, Description, Account, Debit, Deposit, Running Total, Confidence
+        display_cols = ['Confidence Level', 'Date', 'Description', 'Account', 'Debit', 'Deposit', 'Running Total', 'Confidence']
         display_cols = [col for col in display_cols if col in df_display.columns]
         
         # Dataframe with colored confidence indicators

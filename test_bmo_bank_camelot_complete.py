@@ -159,7 +159,13 @@ def extract_bmo_bank_statement_camelot(pdf_path):
             shutil.rmtree = _orig_rmtree
             # Restore tempdir so openpyxl/other libs don't get NameError in gettempdir()
             tempfile.tempdir = _saved_tempdir if _saved_tempdir is not None else None
-        
+            # Auto-delete workspace temp dir (ignore errors if locked e.g. on Windows)
+            try:
+                if _workspace_tmp.exists():
+                    shutil.rmtree(_workspace_tmp, ignore_errors=True)
+            except Exception:
+                pass
+
         # Debug: Print what Camelot found (skip when BMO_VERIFY_QUIET=1 for batch verification)
         if os.environ.get('BMO_VERIFY_QUIET', '').strip() != '1':
             print(f"\n{'='*80}")
