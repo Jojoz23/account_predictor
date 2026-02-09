@@ -190,6 +190,7 @@ class BankStatementExtractor:
         """
         Strategy 2: Extract using regex patterns on text
         Works well for: RBC, Scotiabank, text-based PDFs
+        Falls back to OCR for scanned PDFs
         """
         print("📝 Trying text extraction strategy...")
         
@@ -200,30 +201,58 @@ class BankStatementExtractor:
         with pdfplumber.open(self.pdf_path) as pdf:
             sample_text = pdf.pages[0].extract_text() if pdf.pages else ""
         
-        self._detect_bank(sample_text)
-        
-        # Use PyPDF2 for RBC (better formatting), pdfplumber for others
-        if self.metadata['bank'] == 'RBC':
+        # If no text extracted, try OCR
+        if not sample_text or len(sample_text.strip()) < 50:
+            print("   No text found, trying OCR for scanned PDF...")
             try:
-                # Try PyPDF2 first (better for RBC statements)
-                import PyPDF2
-                with open(self.pdf_path, 'rb') as file:
-                    reader = PyPDF2.PdfReader(file)
-                    for page in reader.pages:
-                        page_text = page.extract_text()
-                        if page_text:
-                            all_text += page_text + "\n"
+                from ocr_helper import extract_text_with_ocr, is_scanned_pdf
+                if is_scanned_pdf(self.pdf_path):
+                    all_text = extract_text_with_ocr(self.pdf_path)
+                    self.metadata['extraction_method'] = 'ocr'
+                else:
+                    # Not scanned, just empty - use normal extraction
+                    sample_text = ""
+            except ImportError:
+                print("   OCR not available (ocr_helper.py not found)")
             except Exception as e:
-                # Fallback to pdfplumber
-                print(f"PyPDF2 failed, trying pdfplumber: {str(e)}")
+                print(f"   OCR failed: {e}")
+                # Continue with normal extraction
+        
+        self._detect_bank(sample_text if sample_text else all_text[:1000])
+        
+        # If OCR was used, we already have the text
+        if all_text and self.metadata.get('extraction_method') == 'ocr':
+            pass  # all_text already populated
+        else:
+            # Use PyPDF2 for RBC (better formatting), pdfplumber for others
+            if self.metadata['bank'] == 'RBC':
+                try:
+                    # Try PyPDF2 first (better for RBC statements)
+                    import PyPDF2
+                    with open(self.pdf_path, 'rb') as file:
+                        reader = PyPDF2.PdfReader(file)
+                        for page in reader.pages:
+                            page_text = page.extract_text()
+                            if page_text:
+                                all_text += page_text + "\n"
+                except Exception as e:
+                    # Fallback to pdfplumber
+                    print(f"PyPDF2 failed, trying pdfplumber: {str(e)}")
+                    with pdfplumber.open(self.pdf_path) as pdf:
+                        for page in pdf.pages:
+                            text = page.extract_text()
+                            if text:
+                                all_text += text + "\n"
+            else:
+                # Use pdfplumber for non-RBC banks
                 with pdfplumber.open(self.pdf_path) as pdf:
                     for page in pdf.pages:
-                        all_text += page.extract_text() + "\n"
-        else:
-            # Use pdfplumber for non-RBC banks
-            with pdfplumber.open(self.pdf_path) as pdf:
-                for page in pdf.pages:
-                    all_text += page.extract_text() + "\n"
+                        text = page.extract_text()
+                        if text:
+                            all_text += text + "\n"
+        
+        if not all_text or len(all_text.strip()) < 50:
+            return None
         
         # Extract transactions using regex patterns based on bank type
         if self.metadata['bank'] == 'RBC':

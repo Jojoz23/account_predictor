@@ -746,10 +746,24 @@ def extract_rbc_chequing_statement(pdf_path):
         print(f"Error extracting with Camelot: {e}")
         import traceback
         traceback.print_exc()
-        return None, opening_balance, closing_balance, statement_year
+        # Fall back to OCR text parsing if Camelot fails
+        print("Attempting OCR text parsing fallback...")
+        ocr_transactions = _parse_rbc_from_ocr_text(full_text, statement_start_year, statement_end_year, statement_start_month, statement_end_month)
+        if ocr_transactions:
+            transactions = ocr_transactions
+            print(f"✅ OCR text parsing extracted {len(transactions)} transactions")
+        else:
+            return None, opening_balance, closing_balance, statement_year
     
     if not transactions:
-        return None, opening_balance, closing_balance, statement_year
+        # Try OCR text parsing as last resort
+        print("No transactions found with Camelot, trying OCR text parsing...")
+        ocr_transactions = _parse_rbc_from_ocr_text(full_text, statement_start_year, statement_end_year, statement_start_month, statement_end_month)
+        if ocr_transactions:
+            transactions = ocr_transactions
+            print(f"✅ OCR text parsing extracted {len(transactions)} transactions")
+        else:
+            return None, opening_balance, closing_balance, statement_year
     
     df = pd.DataFrame(transactions)
     

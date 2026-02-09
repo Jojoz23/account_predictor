@@ -27,3 +27,4 @@ if df is not None and len(df) > 0:
     print(df[['Date', 'Description', 'Withdrawals', 'Deposits']].tail(5).to_string())
 
 
+

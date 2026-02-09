@@ -33,6 +33,10 @@ openpyxl>=3.1.0
 # pytesseract>=0.3.10
 # pdf2image>=1.16.0
 
+# Computer Vision for layout-aware OCR
+# opencv-python>=4.8.0  # For column detection (Phase 2)
+# Pillow>=10.0.0  # For image preprocessing
+
 # TensorFlow for Neural Network
 tensorflow>=2.13.0
 

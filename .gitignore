@@ -23,6 +23,9 @@ results/*.html
 # Jupyter notebook checkpoints
 .ipynb_checkpoints/
 
+# Camelot temp dir (workspace-based for sandbox)
+camelot_temp/
+
 # Python cache
 __pycache__/
 *.py[cod]
@@ -61,4 +64,16 @@ logs/
 *.zip
 *.tar.gz
 *.rar
+
+# Generated extraction/verification outputs (root)
+*_extracted.xlsx
+BMO_Verification_Results_*.xlsx
+BMO_*_All_Statements_*.xlsx
+*_combined_*.xlsx
+google_output*
+*_verify_output.txt
+*_camelot_output.txt
+*_comparison.txt
+bmo_test_output.xlsx
+bmo_camelot_test_single.xlsx
 

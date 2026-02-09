@@ -174,6 +174,7 @@ from extractors import (
     extract_cibc_bank_statement,
     NBBankExtractor,
     NBCompanyCCExtractor,
+    BMOBankExtractor,
     GenericExtractor,
 )
 
@@ -224,15 +225,19 @@ class BankExtractorOrchestrator:
         # because credit card statements might also contain bank name
         from extractors.rbc_chequing_extractor import RBCChequingExtractor
         from extractors.rbc_mastercard_extractor import RBCMastercardExtractor
+        from extractors.bmo_bank_extractor import BMOBankExtractor
+        from extractors.bmo_credit_card_extractor import BMOCreditCardExtractor
         
         self.extractors = [
             TDVisaExtractor(),      # Check TD Visa before TD Bank
             ScotiaVisaExtractor(),  # Check Scotia Visa before Scotiabank
             NBCompanyCCExtractor(),  # Check NB Company Credit Card before NB Bank
             RBCMastercardExtractor(), # RBC Mastercard (before RBC Chequing)
+            BMOCreditCardExtractor(), # BMO Credit Card (before BMO Bank)
             RBCChequingExtractor(), # RBC Chequing (before other RBC products)
             TangerineExtractor(),   # Tangerine Bank (before Scotiabank to avoid false matches)
             TDBankExtractor(),
+            BMOBankExtractor(),     # BMO Bank
             ScotiabankExtractor(),
             CIBCBankExtractor(),    # CIBC Bank (CAD and USD)
             NBBankExtractor(),      # National Bank (CAD and USD)
@@ -335,4 +340,146 @@ if __name__ == "__main__":
         print(result.df.head(5).to_string())
     else:
         print(f"\n❌ Extraction failed: {result.error}")
+
+
+        raise NotImplementedError("Subclasses must implement detect_bank()")
+
+
+
+
+
+# ============================================================================
+
+# BANK EXTRACTORS
+# ============================================================================
+
+# Import all extractors from the extractors package
+
+from extractors import (
+    TDBankExtractor,
+    TDVisaExtractor,
+    extract_td_visa_statement,
+    ScotiaVisaExtractor,
+    extract_scotia_visa_statement,
+    ScotiabankExtractor,
+    TangerineExtractor,
+    GenericExtractor,
+)
+
+# Re-export for backward compatibility
+__all__ = [
+    'ExtractionResult',
+    'standardize_dataframe',
+    'BankExtractorInterface',
+    'TDBankExtractor',
+    'TDVisaExtractor',
+    'extract_td_visa_statement',
+    'ScotiaVisaExtractor',
+    'extract_scotia_visa_statement',
+    'ScotiabankExtractor',
+    'TangerineExtractor',
+    'GenericExtractor',
+    'BankExtractorOrchestrator',
+    'extract_bank_statement',
+]
+
+
+
+
+# ============================================================================
+
+# CONVENIENCE FUNCTIONS
+
+# ============================================================================
+
+
+
+def extract_bank_statement(pdf_path: str) -> ExtractionResult:
+
+    """
+
+    Convenience function to extract bank statement.
+
+    
+
+    Usage:
+
+        result = extract_bank_statement('path/to/statement.pdf')
+
+        if result.success:
+
+            df = result.df
+
+            print(df.head())
+
+    """
+
+    orchestrator = BankExtractorOrchestrator()
+
+    return orchestrator.extract(pdf_path)
+
+
+
+
+
+if __name__ == "__main__":
+
+    # Test the interface
+
+    import sys
+
+    
+
+    if len(sys.argv) < 2:
+
+        print("Usage: python standardized_bank_extractors.py <pdf_path>")
+
+        sys.exit(1)
+
+    
+
+    pdf_path = sys.argv[1]
+
+    
+
+    print("="*80)
+
+    print("STANDARDIZED BANK EXTRACTOR TEST")
+
+    print("="*80)
+
+    print(f"\nPDF: {pdf_path}\n")
+
+    
+
+    result = extract_bank_statement(pdf_path)
+
+    
+
+    if result.success:
+
+        print(f"\n✅ Extraction successful!")
+
+        print(f"   Bank: {result.metadata.get('bank')}")
+
+        print(f"   Credit Card: {result.metadata.get('is_credit_card')}")
+
+        print(f"   Transactions: {len(result.df)}")
+
+        print(f"   Opening Balance: ${result.metadata.get('opening_balance'):,.2f}" if result.metadata.get('opening_balance') else "   Opening Balance: Not found")
+
+        print(f"   Closing Balance: ${result.metadata.get('closing_balance'):,.2f}" if result.metadata.get('closing_balance') else "   Closing Balance: Not found")
+
+        print(f"\n   Columns: {list(result.df.columns)}")
+
+        print(f"\n   First 5 transactions:")
+
+        print(result.df.head(5).to_string())
+
+    else:
+
+        print(f"\n❌ Extraction failed: {result.error}")
+
+
+
 

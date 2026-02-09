@@ -22,3 +22,4 @@ if df is not None and len(df) > 0:
             print(f"Difference: ${diff:,.2f}")
 
 
+
