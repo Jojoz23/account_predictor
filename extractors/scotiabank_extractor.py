@@ -8,34 +8,34 @@ class ScotiabankExtractor(BankExtractorInterface):
     """Extractor for Scotiabank statements (not Visa)"""
     
     def detect_bank(self, pdf_path: str) -> bool:
-        """Check if PDF is a Scotiabank statement (not Visa)"""
+        """Check if PDF is a Scotiabank bank statement (chequing/savings/business). Exclude card statements (they have REF.#)."""
         try:
             import pdfplumber
             with pdfplumber.open(pdf_path) as pdf:
-                text = pdf.pages[0].extract_text() if pdf.pages else ""
+                text = pdf.pages[0].extract_text() or ""
                 text_lower = text.lower()
-                
-                # Check for Scotiabank indicators (not Visa)
                 has_scotia = 'scotiabank' in text_lower or 'bank of nova scotia' in text_lower
-                has_visa = 'visa' in text_lower and ('credit card' in text_lower or 'visa card' in text_lower)
-                
-                return has_scotia and not has_visa
-        except:
+                # Scotia Business/layout when "scotiabank" not in text: Statement Of, Account Details, Balance ($)
+                has_scotia_bank_layout = (
+                    'statement of' in text_lower and 'account details' in text_lower
+                    and 'balance' in text_lower and ('withdrawal' in text_lower or 'debit' in text_lower)
+                )
+                is_card_statement = 'ref.#' in text_lower or 'ref.#' in text
+                return (has_scotia or has_scotia_bank_layout) and not is_card_statement
+        except Exception:
             return False
     
     def extract(self, pdf_path: str) -> ExtractionResult:
         """
-        Extract Scotiabank statement.
-        
-        Note: Uses the main extract_bank_statements.py as fallback
-        since there's no dedicated Scotiabank extraction script.
+        Extract Scotiabank bank statement (chequing/savings/business).
+        Uses the standalone extract_scotiabank_cheq_savings script (all pages/tables,
+        BALANCE FORWARD, multiline descriptions, closing balance from last row).
         """
         try:
-            from extract_bank_statements import BankStatementExtractor
-            
-            extractor = BankStatementExtractor(pdf_path)
-            df = extractor.extract(strategy='camelot')
-            
+            from extract_scotiabank_cheq_savings import extract_scotiabank_cheq_savings
+
+            df, opening_balance, closing_balance, statement_year = extract_scotiabank_cheq_savings(str(pdf_path))
+
             if df is None or df.empty:
                 return ExtractionResult(
                     df=pd.DataFrame(),
@@ -43,20 +43,18 @@ class ScotiabankExtractor(BankExtractorInterface):
                     success=False,
                     error="No transactions extracted"
                 )
-            
-            # Standardize DataFrame
+
             df_standardized = standardize_dataframe(df, is_credit_card=False)
-            
-            # Get metadata from extractor
+
             metadata = {
-                'bank': extractor.metadata.get('bank', 'Scotiabank'),
-                'is_credit_card': extractor.metadata.get('is_credit_card', False),
-                'opening_balance': extractor.metadata.get('opening_balance'),
-                'closing_balance': extractor.metadata.get('closing_balance'),
-                'statement_year': extractor.metadata.get('statement_year'),
-                'extraction_method': 'camelot'
+                'bank': 'Scotiabank',
+                'is_credit_card': False,
+                'opening_balance': opening_balance,
+                'closing_balance': closing_balance,
+                'statement_year': int(statement_year) if statement_year else None,
+                'extraction_method': 'extract_scotiabank_cheq_savings'
             }
-            
+
             return ExtractionResult(
                 df=df_standardized,
                 metadata=metadata,

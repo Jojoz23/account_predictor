@@ -472,6 +472,78 @@ def test_scotia_visa(pdf_path: str, verbose: bool = False):
     return all_match
 
 
+def test_scotia_bank(pdf_path: str, verbose: bool = False):
+    """Test Scotiabank (chequing/savings/business) extraction"""
+    if verbose:
+        print("\n" + "="*80)
+        print("TESTING SCOTIA BANK EXTRACTION")
+        print("="*80)
+        print(f"PDF: {Path(pdf_path).name}\n")
+
+    try:
+        from extract_scotiabank_cheq_savings import extract_scotiabank_cheq_savings
+        df_original, opening_orig, closing_orig, year_orig = extract_scotiabank_cheq_savings(pdf_path)
+    except Exception as e:
+        if verbose:
+            print(f"   ❌ Error: {e}")
+            import traceback
+            traceback.print_exc()
+        return False
+
+    if df_original is None or len(df_original) == 0:
+        if verbose:
+            print("   ❌ Original: no transactions extracted")
+        return False
+    if verbose:
+        print(f"   ✅ Original: {len(df_original)} transactions")
+        print(f"   Opening: ${opening_orig:,.2f}" if opening_orig else "   Opening: Not found")
+        print(f"   Closing: ${closing_orig:,.2f}" if closing_orig else "   Closing: Not found")
+
+    try:
+        result = extract_bank_statement(pdf_path)
+        if not result.success:
+            if verbose:
+                print(f"   ❌ Standardized: {result.error}")
+            return False
+        df_standardized = result.df
+        opening_std = result.metadata.get('opening_balance')
+        closing_std = result.metadata.get('closing_balance')
+        if verbose:
+            print(f"   ✅ Standardized: {len(df_standardized)} transactions")
+    except Exception as e:
+        if verbose:
+            print(f"   ❌ Error: {e}")
+            import traceback
+            traceback.print_exc()
+        return False
+
+    opening_match = (opening_orig is None and opening_std is None) or (opening_orig is not None and opening_std is not None and abs(opening_orig - opening_std) < 0.01)
+    closing_match = (closing_orig is None and closing_std is None) or (closing_orig is not None and closing_std is not None and abs(closing_orig - closing_std) < 0.01)
+    differences = compare_dataframes(df_original, df_standardized)
+
+    if verbose:
+        print(f"   Opening match: {'✅' if opening_match else '❌'}")
+        print(f"   Closing match: {'✅' if closing_match else '❌'}")
+        print(f"   Transaction count match: {'✅' if differences['row_count_match'] else '❌'}")
+    else:
+        if not opening_match or not closing_match or not differences['row_count_match'] or differences['transaction_differences']:
+            print(f"   ❌ FAIL - ", end="")
+            issues = []
+            if not opening_match:
+                issues.append("opening balance mismatch")
+            if not closing_match:
+                issues.append("closing balance mismatch")
+            if not differences['row_count_match']:
+                issues.append(f"transaction count ({len(df_original)} vs {len(df_standardized)})")
+            if differences['transaction_differences']:
+                issues.append(f"{len(differences['transaction_differences'])} tx differences")
+            print(", ".join(issues))
+        else:
+            print(f"   ✅ PASS - {len(df_original)} transactions, balances match")
+
+    return opening_match and closing_match and differences['row_count_match'] and len(differences['transaction_differences']) == 0
+
+
 def test_tangerine(pdf_path: str, verbose: bool = False):
     """Test Tangerine Bank extraction"""
     if verbose:
@@ -1639,8 +1711,38 @@ Examples:
             'flag': 'td-visa'
         },
         {
+            'name': 'Scotia Business',
+            'folder': Path("data/Scotia Business"),
+            'test_func': test_scotia_bank,
+            'flag': 'scotia'
+        },
+        {
+            'name': 'Scotiabank Cheq 0725',
+            'folder': Path("data/Scotiabank Cheq 0725"),
+            'test_func': test_scotia_bank,
+            'flag': 'scotia'
+        },
+        {
             'name': 'Scotia Visa',
             'folder': Path("data/Scotia Visa"),
+            'test_func': test_scotia_visa,
+            'flag': 'scotia'
+        },
+        {
+            'name': 'Scotia- Personal credit card',
+            'folder': Path("data/Scotia- Personal credit card"),
+            'test_func': test_scotia_visa,
+            'flag': 'scotia'
+        },
+        {
+            'name': 'Scotiabank AMEX 54023',
+            'folder': Path("data/Scotiabank AMEX 54023"),
+            'test_func': test_scotia_visa,
+            'flag': 'scotia'
+        },
+        {
+            'name': 'Scotiabank Visa 3023',
+            'folder': Path("data/Scotiabank Visa 3023"),
             'test_func': test_scotia_visa,
             'flag': 'scotia'
         },
