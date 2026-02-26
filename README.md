@@ -1,21 +1,22 @@
 # 🧠 AI-Powered Bank Statement Processor
 
-**Automatically extract, categorize, and export bank transactions using machine learning.**
+**Automatically extract, categorize, and export bank and credit card transactions using machine learning.**
 
-Transform PDF bank statements into categorized QuickBooks-ready data in seconds!
+Transform PDF statements into categorized Excel and QuickBooks-ready data in seconds!
 
 ---
 
 ## ✨ Features
 
-- 📄 **PDF Extraction** - Automatically extract transactions from bank statement PDFs
-- 🏦 **Multi-Bank Support** - Works with RBC, TD, BMO, Scotiabank, CIBC, and more
-- 💳 **Credit Card Support** - Auto-detects and handles credit card statements correctly
-- 🤖 **AI Categorization** - Neural network predicts account categories with 87% accuracy
-- 📊 **Excel Export** - Beautiful Excel reports with confidence scores
-- 💼 **QuickBooks Ready** - Direct export to QuickBooks IIF format
+- 📄 **PDF to Excel** - Extract transactions from PDF statements into Excel (single file or folder batch)
+- 🏦 **Bank & Credit Card** - Works with both bank accounts and credit cards (auto-detected)
+- 🏛️ **Multi-Bank Support** - TD, Scotiabank, Tangerine, CIBC, National Bank, RBC, BMO, AMEX, and more
+- 🤖 **AI Categorization** - Neural network predicts QuickBooks account categories with high accuracy
+- 📊 **Excel Export** - Multi-sheet Excel (Transactions, Summary, By Account) with confidence scores
+- 💼 **QuickBooks IIF** - Convert Excel to IIF for import into QuickBooks Desktop (bank and credit card)
 - 🎯 **Confidence Scores** - Know which predictions to review
-- 🔄 **Batch Processing** - Process entire folders of statements at once
+- 🔄 **Batch Processing** - Process entire folders of PDFs; batch convert Excel files to IIF
+- 🌐 **Web App** - [Bookeepifier](https://bookeepifier.streamlit.app/) — upload PDFs, get Excel + QuickBooks IIF (same IIF script as CLI)
 
 ---
 
@@ -24,55 +25,65 @@ Transform PDF bank statements into categorized QuickBooks-ready data in seconds!
 ### 1. Install Dependencies
 
 ```bash
-# Option A: Automated setup
-python setup_pdf_extraction.py
-
-# Option B: Manual install
 pip install -r requirements.txt
+# Or: python setup_pdf_extraction.py
 ```
 
-### 2. Train the AI Model
+### 2. PDF → Excel (recommended flow)
 
 ```bash
-# Open Jupyter and run the training notebook
+# Process a folder of PDFs → one combined Excel (bank or credit card, auto-detected)
+python process_to_excel.py "path/to/statement_folder/"
+# Optional: --output my_combined.xlsx
+```
+
+### 3. Excel → QuickBooks IIF
+
+```bash
+# Convert Excel to IIF (works for both bank accounts and credit cards)
+python excel_to_iif.py path/to/combined.xlsx
+# Optional: -o output.iif  -a "My Account Name"  --exclude-transfers  --skip-accounts
+```
+
+### 4. Web UI
+
+**Live app:** [bookeepifier.streamlit.app](https://bookeepifier.streamlit.app/) — upload PDFs, download Excel and QuickBooks IIF (bank or credit card). IIF is generated with the same `excel_to_iif` script.
+
+Run locally:
+
+```bash
+streamlit run streamlit_app.py
+```
+
+### 5. (Optional) Train or retrain the AI model
+
+```bash
 jupyter notebook
-# Then run: notebooks/03_neural_network_training.ipynb
+# Run: notebooks/03_neural_network_training.ipynb
 ```
 
-### 3. Process Bank Statements
-
-```bash
-# Single PDF file (auto-detects credit card vs bank)
-python pdf_to_quickbooks.py path/to/statement.pdf
-
-# Force credit card mode (if auto-detection fails)
-python pdf_to_quickbooks.py path/to/visa_statement.pdf --credit-card
-
-# Entire folder
-python pdf_to_quickbooks.py path/to/statements_folder/
-```
-
-**That's it!** Your transactions are now extracted, categorized, and ready for QuickBooks.
+**That's it!** Your statements are extracted to Excel and (optionally) ready for QuickBooks.
 
 ---
 
 ## 📋 What You Get
 
-### Input: Bank Statement PDF
-```
-RBC_Statement_January_2024.pdf
-```
+### Input
+- **PDFs:** Bank or credit card statement PDFs (single file or folder)
 
-### Output Files:
+### Output (PDF → Excel flow)
 
-1. **`categorized_RBC_Statement_January_2024.xlsx`**
-   - Categorized transactions with confidence scores
-   - Summary statistics
-   - Account breakdown
+1. **Combined Excel** (e.g. `TD bank - 4738_20250224_143022.xlsx`)
+   - **Transactions** sheet: Date, Description, Withdrawals/Deposits (or Amount), Account, Confidence
+   - **Summary** sheet: per-file stats, opening/closing balances
+   - **By Account** sheet: totals by category
 
-2. **`quickbooks_RBC_Statement_January_2024.iif`**
-   - Ready to import into QuickBooks Desktop
-   - Properly formatted for accounting software
+### Output (Excel → IIF flow)
+
+2. **QuickBooks IIF file** (e.g. `combined.iif`)
+   - Ready to import: QuickBooks Desktop → File → Utilities → Import → IIF
+   - Works for **bank accounts** (Withdrawals/Deposits) and **credit cards** (Amount column)
+   - Optional: `create_accounts_iif.py` creates an IIF with account definitions to import first
 
 ---
 
@@ -89,42 +100,40 @@ RBC_Statement_January_2024.pdf
 
 ## 🎯 Usage Scenarios
 
-### Scenario 1: Extract Only (No AI)
+### Scenario 1: PDF folder → Excel (main flow)
 
-Just want the raw transaction data?
-
-```bash
-python extract_bank_statements.py statement.pdf
-```
-
-**Output:** `extracted_statement.xlsx` with Date, Description, Withdrawals, Deposits, Balance
-
-### Scenario 2: Full AI Pipeline
-
-Extract + Categorize + Export for QuickBooks:
+Process all PDFs in a folder into one combined Excel (bank or credit card, auto-detected):
 
 ```bash
-python pdf_to_quickbooks.py statement.pdf
+python process_to_excel.py "data/TD bank - 4738"
 ```
 
-**Output:** 
-- Categorized Excel with AI predictions
-- QuickBooks IIF import file
+**Output:** One Excel file with Transactions, Summary, and By Account sheets.
 
-### Scenario 3: Batch Process Monthly Statements
+### Scenario 2: Excel → QuickBooks IIF
+
+Convert an existing Excel file to QuickBooks IIF. **Works for both bank accounts and credit cards** (auto-detects from columns: Withdrawals/Deposits = bank, Amount = credit card).
 
 ```bash
-python pdf_to_quickbooks.py monthly_statements/
+python excel_to_iif.py combined.xlsx
+python excel_to_iif.py folder_of_excel_files/ -o output_folder/
 ```
 
-**Output:**
-- Individual Excel files for each statement
-- Combined Excel with all transactions
-- Combined QuickBooks import file
+**Options:** `-a "Account Name"`, `--exclude-transfers`, `--skip-accounts`, `--date-from`, `--date-to`, etc.
 
-### Scenario 4: Categorize Existing Excel Data
+### Scenario 3: Create IIF account definitions
 
-Already have transaction data in Excel?
+Generate an IIF file with account definitions to import into QuickBooks before transactions (bank and credit card accounts are typed correctly):
+
+```bash
+python create_accounts_iif.py combined.xlsx
+```
+
+**Output:** `accounts_combined.iif` — import this first, then import the transaction IIF.
+
+### Scenario 4: Categorize existing Excel/CSV
+
+Already have transaction data?
 
 ```bash
 python batch_predict.py transactions.xlsx
@@ -132,18 +141,11 @@ python batch_predict.py transactions.xlsx
 
 ---
 
-## 🏦 Supported Banks
+## 🏦 Supported Banks & Credit Cards
 
-✅ **Canadian Banks:**
-- RBC (Royal Bank of Canada)
-- TD Canada Trust
-- BMO (Bank of Montreal)
-- Scotiabank
-- CIBC
-- National Bank
-- Desjardins
-
-✅ **Works with most banks worldwide** that provide table-based PDF statements.
+✅ **Bank accounts:** TD, Scotiabank, Tangerine, CIBC, National Bank, RBC Chequing, BMO  
+✅ **Credit cards:** TD Visa, Scotia Visa, RBC Mastercard, BMO Credit Card, National Bank Company Credit Card, AMEX (Amex Bank of Canada)  
+✅ **Generic fallback** for other table-based PDF statements.
 
 ---
 
@@ -164,44 +166,56 @@ python batch_predict.py transactions.xlsx
 
 ```
 account_predictor/
-├── extract_bank_statements.py    # PDF extraction only
-├── pdf_to_quickbooks.py           # Full pipeline (Extract + AI + Export)
-├── batch_predict.py               # Predict on existing Excel/CSV
+├── process_to_excel.py            # PDF folder → combined Excel (bank or credit card)
+├── excel_to_iif.py                # Excel → QuickBooks IIF (bank & credit card)
+├── create_accounts_iif.py         # Excel → IIF account definitions (bank & credit card)
+├── batch_predict.py               # Predict categories on existing Excel/CSV
+├── extract_bank_statements.py     # Legacy PDF extraction
+├── standardized_bank_extractors.py # Bank/credit-card detection and extraction
+├── streamlit_app.py               # Web UI (Bookeepifier)
 ├── setup_pdf_extraction.py        # Dependency installer
-├── test_pdf_extraction.py         # Test suite
+├── extractors/                    # Bank- and card-specific extractors
+│   ├── td_bank_extractor.py, td_visa_extractor.py
+│   ├── scotiabank_extractor.py, scotia_visa_extractor.py
+│   ├── cibc_bank_extractor.py, nb_bank_extractor.py, nb_company_cc_extractor.py
+│   ├── rbc_chequing_extractor.py, rbc_mastercard_extractor.py
+│   ├── bmo_bank_extractor.py, bmo_credit_card_extractor.py
+│   ├── tangerine_extractor.py, amex_extractor.py, generic_extractor.py
+│   └── __init__.py
 ├── notebooks/
 │   ├── 02_model_training.ipynb               # Random Forest model
-│   └── 03_neural_network_training.ipynb      # Neural Network (BEST)
+│   └── 03_neural_network_training.ipynb      # Neural Network (recommended)
 ├── models/
 │   └── neural_network_account_predictor.pkl  # Trained AI model
 ├── data/
 │   └── data_template.csv          # Training data
-└── PDF_EXTRACTION_GUIDE.md        # Detailed documentation
+└── PDF_EXTRACTION_GUIDE.md        # Detailed extraction docs
 ```
 
 ---
 
 ## 🔧 Advanced Usage
 
+### QuickBooks IIF: bank and credit card
+
+The **IIF scripts work for both bank accounts and credit cards**:
+
+- **`excel_to_iif.py`** — Reads Excel with either **Withdrawals/Deposits** (bank) or a single **Amount** column (credit card) and writes correctly typed QuickBooks IIF (BANK vs CREDIT CARD transactions and account types).
+- **`create_accounts_iif.py`** — Builds account definitions from your Excel and sets account type to BANK or CREDIT CARD (and INC/EXP) so QuickBooks accepts both.
+
+**End balances matching the statement:** If your Excel has a **Running_Balance** column (from the PDF→Excel flow), the IIF now includes an **opening balance** transaction derived from it. That way QuickBooks’ register ending balance matches the statement. Without it, QuickBooks would start the account at 0, so the ending balance would be off by exactly the statement’s opening balance.
+
+Use the same Excel output from `process_to_excel.py` whether the folder contained bank or credit card PDFs.
+
 ### Python API
 
 ```python
-from extract_bank_statements import extract_from_pdf
-from pdf_to_quickbooks import PDFToQuickBooks
-
-# Extract transactions from PDF
-df = extract_from_pdf('statement.pdf')
-print(f"Extracted {len(df)} transactions")
-
-# Predict account categories
-pipeline = PDFToQuickBooks()
-df = pipeline.predict_accounts(df)
-
-# Export to Excel
-pipeline.save_to_excel(df, 'output.xlsx')
-
-# Export to QuickBooks
-pipeline.save_to_quickbooks_iif(df, 'output.iif')
+from standardized_bank_extractors import extract_bank_statement
+result = extract_bank_statement('statement.pdf')
+if result.success:
+    df = result.df  # bank or credit card, auto-detected
+from excel_to_iif import excel_to_iif
+excel_to_iif('combined.xlsx', 'output.iif', bank_account_name='TD 4738')
 ```
 
 ### Custom Processing
@@ -270,7 +284,8 @@ needs_review.to_excel('review_needed.xlsx', index=False)
 
 ## 📚 Documentation
 
-- **[PDF Extraction Guide](PDF_EXTRACTION_GUIDE.md)** - Detailed usage guide
+- **[PDF Extraction Guide](PDF_EXTRACTION_GUIDE.md)** - PDF extraction details
+- **[Adding a New Bank](ADDING_NEW_BANK_GUIDE.md)** - How to add new bank/credit card extractors
 - **[Neural Network Notebook](notebooks/03_neural_network_training.ipynb)** - Model training
 - **[Random Forest Notebook](notebooks/02_model_training.ipynb)** - Alternative model
 
@@ -278,26 +293,18 @@ needs_review.to_excel('review_needed.xlsx', index=False)
 
 ## 🎓 How It Works
 
-1. **PDF Extraction**
-   - Uses pdfplumber, PyPDF2, and tabula for multi-strategy extraction
-   - Detects tables and text patterns
-   - Handles various bank statement formats
+1. **PDF → Excel (`process_to_excel.py`)**
+   - **Standardized extractors** detect bank or credit card from PDF content (TD, Scotia, CIBC, RBC, BMO, Tangerine, National Bank, AMEX, etc.).
+   - Extracts transactions (Date, Description, Withdrawals/Deposits or Amount, Running Balance).
+   - Optional **AI categorization** adds Account and Confidence; writes multi-sheet Excel.
 
-2. **Data Cleaning**
-   - Standardizes date formats
-   - Removes headers/footers
-   - Cleans amounts and descriptions
+2. **Excel → IIF (`excel_to_iif.py`, `create_accounts_iif.py`)**
+   - Reads Excel (bank format: Withdrawals/Deposits; credit card format: Amount).
+   - Writes QuickBooks IIF with correct transaction and account types (BANK / CREDIT CARD / INC / EXP).
 
-3. **AI Prediction**
-   - Neural network with 1,900+ features
-   - TF-IDF analysis of transaction descriptions
-   - Date, amount, and pattern features
-   - 512→256→128→64 architecture
-
-4. **Export**
-   - Excel with multiple sheets (transactions, summary, breakdown)
-   - QuickBooks IIF format for direct import
-   - Confidence scores for quality control
+3. **AI Prediction** (when used)
+   - Neural network with TF-IDF on descriptions plus date/amount features.
+   - Outputs QuickBooks-style account categories and confidence scores.
 
 ---
 

@@ -89,6 +89,26 @@ def excel_to_iif(excel_path, output_path=None, bank_account_name=None, exclude_t
         has_account = 'Account' in df.columns
         has_date = 'Date' in df.columns
         has_description = 'Description' in df.columns
+        has_running_balance = 'Running_Balance' in df.columns
+        
+        # Derive opening balance from Excel so QuickBooks ending balance matches statement
+        # Running_Balance after first tx = opening + Amount[0], so opening = Running_Balance[0] - Amount[0]
+        opening_balance = None
+        if has_running_balance and has_amount and len(df) > 0:
+            df_sorted = df.dropna(subset=['Date']).copy()
+            df_sorted['_date'] = pd.to_datetime(df_sorted['Date'], errors='coerce')
+            df_sorted = df_sorted.dropna(subset=['_date']).sort_values('_date')
+            if len(df_sorted) > 0 and pd.notna(df_sorted['Running_Balance'].iloc[0]) and pd.notna(df_sorted['Amount'].iloc[0]):
+                try:
+                    first_rb = float(df_sorted['Running_Balance'].iloc[0])
+                    first_amt = float(df_sorted['Amount'].iloc[0])
+                    opening_balance = first_rb - first_amt
+                    if abs(opening_balance) < 1e-6:
+                        opening_balance = None
+                    else:
+                        print(f"   Opening balance (from Running_Balance): {opening_balance:,.2f}")
+                except (TypeError, ValueError):
+                    pass
         
         if not has_date or not has_description:
             print("❌ Excel file must have 'Date' and 'Description' columns")
@@ -167,10 +187,17 @@ def excel_to_iif(excel_path, output_path=None, bank_account_name=None, exclude_t
                 
                 if has_amount:
                     # Credit card format - single Amount column
+                    # Positive Amount = purchase/charge → TRNSTYPE "CREDIT CARD" (TRNS -amt, SPL +amt)
+                    # Negative Amount = payment or refund → TRNSTYPE "CCARD REFUND" (TRNS +amt, SPL -amt)
                     if pd.isna(row['Amount']):
                         continue
                     amount = float(row['Amount'])
-                    trns_type = "CREDIT CARD" if amount < 0 else "DEPOSIT"
+                    if amount == 0:
+                        continue
+                    if amount > 0:
+                        trns_type = "CREDIT CARD"
+                    else:
+                        trns_type = "CCARD REFUND"
                     account = str(row['Account']) if has_account and not pd.isna(row.get('Account')) else "Sales"
                     
                 elif has_withdrawals or has_deposits:
@@ -238,6 +265,10 @@ def excel_to_iif(excel_path, output_path=None, bank_account_name=None, exclude_t
                 print(f"WARNING: Error processing row {idx}: {e}")
                 continue
         
+        # If we have opening balance, we need Opening Bal Equity account for the opening-balance transaction
+        if opening_balance is not None:
+            unique_accounts.add("Opening Bal Equity")
+        
         # Prepare IIF content
         iif_content = []
         
@@ -275,6 +306,9 @@ def excel_to_iif(excel_path, output_path=None, bank_account_name=None, exclude_t
             # Transfer accounts
             if 'transfer' in account_lower:
                 return "BANK"
+            # Opening balance equity (QuickBooks standard)
+            if 'opening bal' in account_lower and 'equity' in account_lower:
+                return "EQUITY"
             # Default to expense for unknown accounts
             return "EXP"
         
@@ -315,19 +349,55 @@ def excel_to_iif(excel_path, output_path=None, bank_account_name=None, exclude_t
         
         # Clean bank account name for transactions (function already defined above)
         cleaned_bank_account = clean_account_name(bank_account_name)
+        main_account_type = get_account_type(bank_account_name)
         
         # Process transactions
         transaction_count = 0
+        
+        # Add opening balance transaction so QuickBooks ending balance matches statement
+        if opening_balance is not None and main_account_type in ("CCARD", "BANK"):
+            ob_date = transaction_data[0]["date_str"] if transaction_data else (
+                pd.to_datetime(df["Date"].min(), errors="coerce").strftime("%m/%d/%Y")
+                if has_date and len(df) else "01/01/2025"
+            )
+            if main_account_type == "CCARD":
+                ob_trns_type = "CREDIT CARD"
+                trns_amt = opening_balance  # negative = owed
+                spl_amt = -opening_balance
+            else:
+                ob_trns_type = "DEPOSIT" if opening_balance > 0 else "CHECK"
+                trns_amt = opening_balance
+                spl_amt = -opening_balance
+            iif_content.append(f"TRNS\t{transaction_count}\t{ob_trns_type}\t{ob_date}\t{cleaned_bank_account}\t\t\t{trns_amt:.2f}\t\tOpening balance")
+            iif_content.append(f"SPL\t{transaction_count}\t{ob_trns_type}\t{ob_date}\tOpening Bal Equity\t\t\t{spl_amt:.2f}\t\tOpening balance")
+            iif_content.append("ENDTRNS")
+            transaction_count += 1
+        
         for tx in transaction_data:
             # Clean account name for transaction
             cleaned_account = clean_account_name(tx['account'])
+            amt = tx['amount']
+            
+            # Credit card: IIF kit uses CREDIT CARD (charge) and CCARD REFUND (payment/refund)
+            # CREDIT CARD:  TRNS = -amount, SPL = +amount  (charge on card, expense)
+            # CCARD REFUND: TRNS = +|amount|, SPL = -|amount|  (credit to card, e.g. payment or refund)
+            if tx['trns_type'] == "CREDIT CARD":
+                trns_amt = -amt
+                spl_amt = amt
+            elif tx['trns_type'] == "CCARD REFUND":
+                abs_amt = abs(amt)
+                trns_amt = abs_amt
+                spl_amt = -abs_amt
+            else:
+                trns_amt = amt
+                spl_amt = -amt
             
             # Create transaction entry
-            # TRNS row: Bank account side
-            iif_content.append(f"TRNS\t{transaction_count}\t{tx['trns_type']}\t{tx['date_str']}\t{cleaned_bank_account}\t\t\t{tx['amount']:.2f}\t\t{tx['description']}")
+            # TRNS row: source account side
+            iif_content.append(f"TRNS\t{transaction_count}\t{tx['trns_type']}\t{tx['date_str']}\t{cleaned_bank_account}\t\t\t{trns_amt:.2f}\t\t{tx['description']}")
             
-            # SPL row: Category account side (opposite sign)
-            iif_content.append(f"SPL\t{transaction_count}\t{tx['trns_type']}\t{tx['date_str']}\t{cleaned_account}\t\t\t{-tx['amount']:.2f}\t\t{tx['description']}")
+            # SPL row: category account side
+            iif_content.append(f"SPL\t{transaction_count}\t{tx['trns_type']}\t{tx['date_str']}\t{cleaned_account}\t\t\t{spl_amt:.2f}\t\t{tx['description']}")
             
             # End transaction
             iif_content.append("ENDTRNS")

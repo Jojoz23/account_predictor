@@ -1,40 +1,10 @@
 """
-Bank Statement PDF to QuickBooks - Streamlit Web App
+Bank Statement PDF to Excel & QuickBooks IIF - Streamlit Web App
 
-HOW THIS APP WORKS:
-==================
+Live app: https://bookeepifier.streamlit.app/
 
-1. USER UPLOADS PDFs
-   - You drag & drop bank statement PDFs (RBC, TD, BMO, Scotiabank, CIBC, Tangerine, National Bank, AMEX)
-   - Can upload single file or multiple files at once
-
-2. EXTRACTION (standardized_bank_extractors.py)
-   - Uses bank-specific extractors (TD, Scotia, Tangerine, CIBC, NB, RBC, BMO, AMEX)
-   - Detects which bank from the PDF content
-   - Extracts all transactions: Date, Description, Amount
-   - Handles multi-line descriptions, deduplication, date parsing
-
-3. AI CATEGORIZATION (pdf_to_quickbooks.py)
-   - Loads pre-trained neural network model (28 QuickBooks account categories)
-   - For each transaction:
-     * Analyzes the description using TF-IDF (text analysis)
-     * Considers date, amount, transaction patterns
-     * Predicts the best account category (e.g., "Office Expense", "Sales")
-     * Provides confidence score (0-100%)
-   
-4. OUTPUT FILES
-   - Excel file: Human-readable with categories, confidence scores
-   - QuickBooks IIF file: Ready to import into QuickBooks Desktop
-
-5. USER DOWNLOADS
-   - Individual files: Download Excel + IIF for each statement
-   - Batch ZIP: All files packaged together
-
-KEY FEATURES:
-- Stores files in memory (not on disk) for security
-- Color-coded confidence indicators (🟢 🟡 🔴)
-- Real-time progress tracking
-- Works offline (runs locally)
+1. Upload PDFs (bank or credit card) → extraction + AI categorization
+2. Download Excel and QuickBooks IIF (IIF generated via excel_to_iif script; works for bank and credit card)
 """
 
 import streamlit as st
@@ -46,6 +16,7 @@ import contextlib
 from pathlib import Path
 from pdf_to_quickbooks import PDFToQuickBooks
 from standardized_bank_extractors import extract_bank_statement
+from excel_to_iif import excel_to_iif
 import zipfile
 import io
 
@@ -92,11 +63,40 @@ if 'is_batch_mode' not in st.session_state:
     st.session_state.is_batch_mode = False
 if 'file_order' not in st.session_state:
     st.session_state.file_order = []
+if 'excel_iif_result' not in st.session_state:
+    st.session_state.excel_iif_result = None
+if 'excel_iif_filename' not in st.session_state:
+    st.session_state.excel_iif_filename = None
+
+def _generate_iif_from_dataframe(df, bank_account_name="Bookeepifier Statements"):
+    """Generate QuickBooks IIF content from a dataframe using excel_to_iif script (bank or credit card)."""
+    with tempfile.TemporaryDirectory() as d:
+        temp_excel = Path(d) / "temp.xlsx"
+        temp_iif = Path(d) / "temp.iif"
+        cols = ["Date", "Description", "Account"]
+        if "Amount" in df.columns:
+            cols.insert(2, "Amount")
+        else:
+            cols.extend(["Withdrawals", "Deposits"])
+        export_df = df[[c for c in cols if c in df.columns]].copy()
+        export_df.to_excel(temp_excel, index=False, sheet_name="Transactions")
+        out = io.StringIO()
+        err = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            result = excel_to_iif(
+                str(temp_excel),
+                str(temp_iif),
+                bank_account_name=bank_account_name,
+                skip_account_definitions=True,
+            )
+        if result and temp_iif.exists():
+            return temp_iif.read_text(encoding="utf-8")
+    return None
 
 def main():
     # Header
     st.title("Bookeepifier")
-    st.markdown("Upload PDF bank statements (RBC, TD, BMO, Scotiabank, CIBC, Tangerine, National Bank, AMEX) → AI categorizes transactions → Download Excel & QuickBooks files")
+    st.markdown("Upload PDF bank or credit card statements → AI categorizes → Download Excel & QuickBooks IIF · [Live app](https://bookeepifier.streamlit.app/)")
     
     st.divider()
     
@@ -210,12 +210,69 @@ def main():
     elif not uploaded_files:
         # Show placeholder when no files are uploaded
         st.divider()
-        st.info("Upload PDF bank statements above to get started")
+        st.info("Upload PDF bank or credit card statements above to get started")
         st.markdown("""
-        **Supported Banks:** RBC, TD, BMO, Scotiabank, CIBC, Tangerine, National Bank, AMEX (bank & credit card statements)  
-        **Features:** AI-powered transaction categorization, Excel & QuickBooks export  
-        **Drag & Drop:** You can drop files anywhere on this page
+        **Live app:** [bookeepifier.streamlit.app](https://bookeepifier.streamlit.app/)  
+        **Supported:** RBC, TD, BMO, Scotiabank, CIBC, Tangerine, National Bank, AMEX (bank & credit card)  
+        **Download:** Excel + QuickBooks IIF (same IIF script as `excel_to_iif.py` — works for both account types)
         """)
+    
+    # Excel → IIF: convert user-uploaded Excel to QuickBooks IIF
+    st.divider()
+    st.subheader("Excel → QuickBooks IIF")
+    st.caption("Already have an Excel file with transactions? Convert it to IIF for QuickBooks import (bank or credit card).")
+    excel_upload = st.file_uploader(
+        "Upload Excel file (.xlsx)",
+        type=["xlsx", "xls"],
+        key="excel_iif_upload",
+        help="Excel must have columns: Date, Description, and either Amount (credit card) or Withdrawals & Deposits (bank). Optionally: Account.",
+    )
+    if excel_upload:
+        # Clear previous result when a new file is uploaded
+        if st.session_state.get("excel_iif_last_name") != excel_upload.name:
+            st.session_state.excel_iif_result = None
+            st.session_state.excel_iif_filename = None
+            st.session_state.excel_iif_last_name = excel_upload.name
+        account_name = st.text_input(
+            "QuickBooks account name (optional)",
+            value="",
+            key="iif_account_name",
+            placeholder="e.g. TD 4738 or Scotia Visa — leave blank to auto-detect from filename",
+        )
+        col_btn, _ = st.columns([1, 3])
+        with col_btn:
+            convert_btn = st.button("Convert to IIF", key="convert_excel_iif", type="primary")
+        if convert_btn:
+            with tempfile.TemporaryDirectory() as d:
+                excel_path = Path(d) / excel_upload.name
+                iif_path = Path(d) / (Path(excel_upload.name).stem + ".iif")
+                excel_path.write_bytes(excel_upload.getvalue())
+                out_buf, err_buf = io.StringIO(), io.StringIO()
+                with contextlib.redirect_stdout(out_buf), contextlib.redirect_stderr(err_buf):
+                    result = excel_to_iif(
+                        str(excel_path),
+                        str(iif_path),
+                        bank_account_name=account_name.strip() or None,
+                        skip_account_definitions=False,
+                    )
+                if result and iif_path.exists():
+                    st.session_state.excel_iif_result = iif_path.read_text(encoding="utf-8")
+                    st.session_state.excel_iif_filename = Path(excel_upload.name).stem + ".iif"
+                    st.success("IIF file ready. Download below.")
+                else:
+                    st.error(
+                        "Conversion failed. Ensure the Excel has a sheet with columns: **Date**, **Description**, "
+                        "and either **Amount** (credit card) or **Withdrawals** & **Deposits** (bank). Optionally **Account**."
+                    )
+        if st.session_state.excel_iif_result:
+            st.download_button(
+                label="Download QuickBooks IIF",
+                data=st.session_state.excel_iif_result,
+                file_name=st.session_state.excel_iif_filename,
+                mime="text/plain",
+                key="dl_excel_iif",
+                type="primary",
+            )
 
 def process_files(uploaded_files, is_credit_card, is_batch_mode):
     """Process uploaded PDF files
@@ -293,9 +350,8 @@ def process_files(uploaded_files, is_credit_card, is_batch_mode):
                         # Credit cards have 'Amount' column, bank accounts have 'Withdrawals'/'Deposits'
                         is_credit_card = 'Amount' in df.columns and 'Withdrawals' not in df.columns
                         
-                        # Generate output files in memory using proper save methods
+                        # Generate output files in memory
                         excel_buffer = io.BytesIO()
-                        iif_buffer = io.StringIO()
                         
                         # Use pipeline's save_to_excel (Option A: pass opening/closing so Excel has correct running balance + Summary)
                         pipeline.save_to_excel(
@@ -306,9 +362,10 @@ def process_files(uploaded_files, is_credit_card, is_batch_mode):
                         excel_buffer.seek(0)
                         excel_data = excel_buffer.read()
                         
-                        # Use pipeline's save_to_quickbooks_iif method
-                        pipeline.save_to_quickbooks_iif(df, iif_buffer)
-                        iif_data = iif_buffer.getvalue()
+                        # Generate IIF via excel_to_iif script (bank & credit card)
+                        iif_data = _generate_iif_from_dataframe(df)
+                        if iif_data is None:
+                            iif_data = ""
                         
                         # Add source file to dataframe for batch mode
                         df['Source_File'] = pdf_path.name
@@ -499,16 +556,13 @@ def show_results():
         # Create combined Excel
         combined_excel_buffer = io.BytesIO()
         pipeline = PDFToQuickBooks(quiet=True)
-        # Detect if combined data is credit card (has Amount column, no Withdrawals/Deposits)
         combined_is_credit_card = 'Amount' in combined_df.columns and 'Withdrawals' not in combined_df.columns
         pipeline.save_to_excel(combined_df, combined_excel_buffer, is_credit_card=combined_is_credit_card)
         combined_excel_buffer.seek(0)
         combined_excel_data = combined_excel_buffer.read()
         
-        # Create combined IIF
-        combined_iif_buffer = io.StringIO()
-        pipeline.save_to_quickbooks_iif(combined_df, combined_iif_buffer)
-        combined_iif_data = combined_iif_buffer.getvalue()
+        # Create combined IIF via excel_to_iif script (bank & credit card)
+        combined_iif_data = _generate_iif_from_dataframe(combined_df) or ""
         
         col1, col2 = st.columns(2)
         with col1:
