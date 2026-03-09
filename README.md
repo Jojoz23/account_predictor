@@ -64,6 +64,13 @@ jupyter notebook
 
 **That's it!** Your statements are extracted to Excel and (optionally) ready for QuickBooks.
 
+### 6. Repository layout
+
+- **config/** — `account_names_map.csv`, `Accounts.TXT` (script looks here if not in root)
+- **docs/** — How-it-works guides, IIF reference (`docs/REPO_LAYOUT.md` has the full layout)
+- **tests/** — Test runners (run from root: `python tests/test_all_xxx.py`)
+- **archive/** — Move old error/timestamped IIFs here to keep root clean
+
 ---
 
 ## 📋 What You Get

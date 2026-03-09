@@ -1,0 +1,213 @@
+
+
+
+2026-02-26 4:24 PMChart of Accounts
+     Account                         Type
+
+
+     Bank                            Bank
+
+     BMO-7779                        Bank
+     Cash on Hand                    Bank
+
+     Accounts Receivable             Accounts Receivable
+     Driver Advances                 Other Current Asset
+
+     HST Recoverable                 Other Current Asset
+     Inventory Asset                 Other Current Asset
+
+     Jetender Singh                  Other Current Asset
+     Loan                            Other Current Asset
+
+     Prepaid Insurance               Other Current Asset
+     Undeposited Funds               Other Current Asset
+
+     Acc.Amort - Freighterline - 05  Fixed Asset
+     Accumulated Depreciation        Fixed Asset
+
+     Freightline Truck Model 195     Fixed Asset
+     Freightliner 2005               Fixed Asset
+
+     Freightliner 2006               Fixed Asset
+     Freightliner 2006XXX            Fixed Asset
+
+     Freightliner 2007               Fixed Asset
+     Freightliner Trucks MT-45-14F   Fixed Asset
+
+     Freightliner Trucks MT-45-19    Fixed Asset
+     Freightliner Trucks P-1200-22FT Fixed Asset
+
+     Freightliner Trucks P-700       Fixed Asset
+     Goodwill                        Fixed Asset
+
+     Business Purchase               Fixed Asset
+     Freighterliner Trucks           Fixed Asset
+
+     Furniture and Equipment         Fixed Asset
+     Goodwill                        Fixed Asset
+
+     Accumated Depreciation -Goodwil Fixed Asset
+     Tractors and Trailers           Fixed Asset
+
+     Trucks                          Fixed Asset
+     Freighterliner 2005             Fixed Asset
+
+     Freighterliner 2006             Fixed Asset
+     Freighterliner 2006XXX          Fixed Asset
+
+     Freighterliner 2007             Fixed Asset
+     Freighterliner Trucks MT-45-19  Fixed Asset
+
+     Freighterliner Trucks MT 45-14F Fixed Asset
+     Freighterliner Trucks P-700     Fixed Asset
+
+     Freightliner P-1200-22FT        Fixed Asset
+     Freightliner Truck Model 195    Fixed Asset
+
+     Freightliner Trucks             Fixed Asset
+     Vehicle Camera                  Fixed Asset
+
+     Zishan Basharat                 Other Asset
+     Accounts Payable                Accounts Payable
+
+     BMO World Elite Mastercard 2589 Credit Card
+     Opening Balance in Credit card  Credit Card
+
+     Scotia Visa                     Credit Card
+     BMO M/C                         Other Current Liability
+
+     GST/HST Payable                 Other Current Liability
+     GST/QST Payable                 Other Current Liability
+
+     Intercompany Loan               Other Current Liability
+     9804978 Canada Inc              Other Current Liability
+
+     Loan Receivable                 Other Current Liability
+     Maria Qadari                    Other Current Liability
+
+     Maria Talah                     Other Current Liability
+     Loan to Mariam Jabari           Other Current Liability
+
+     Payroll Liabilities             Other Current Liability
+     PST Payable (ON)                Other Current Liability
+
+     Worker's Comp Premiums - Admin  Other Current Liability
+     Due to (from) shareholder       Long Term Liability
+
+     11356437 Canada Inc             Long Term Liability
+     Aamna Ijaz                      Long Term Liability
+
+     Ali                             Long Term Liability
+     Farwa                           Long Term Liability
+
+     Jetender Singh                  Long Term Liability
+     Kinex Media                     Long Term Liability
+
+     Maham Akram                     Long Term Liability
+     Maria Qadari                    Long Term Liability
+
+     Maria Talah                     Long Term Liability
+     Mazhar Masood                   Long Term Liability
+
+     Capital Stock                   Equity
+     Dividends Paid                  Equity
+
+     Opening Balance Equity          Equity
+     Owners Draw                     Equity
+
+     Retained Earnings               Equity
+     Shareholder Distributions       Equity
+
+     Fuel Surcharge                  Income
+     Gain on sale of Asset           Income
+
+     Gross Trucking Income           Income
+     Other Income                    Income
+
+     Service Income                  Income
+     Cost of Goods Sold              Cost of Goods Sold
+
+     Fuel for Hired Vehicles         Cost of Goods Sold
+     Subcontracted Services          Cost of Goods Sold
+
+     Travel Expenses for Drivers     Cost of Goods Sold
+     Truck Maintenance Costs         Cost of Goods Sold
+
+     Truck Rental Cost               Cost of Goods Sold
+     Worker's Comp Premiums - Labour Cost of Goods Sold
+
+     Advertising and Promotion       Expense
+     Bank Service Charges            Expense
+
+     Business Licenses and Permits   Expense
+     Charitable Contributions        Expense
+
+     Computer and Internet Expenses  Expense
+     Depreciation Expense            Expense
+
+     Dues and Subscriptions          Expense
+     Equipment Rental                Expense
+
+     Insurance Expense               Expense
+     Interest Expense                Expense
+
+     License and registration fees   Expense
+     Meals and Entertainment         Expense
+
+     Medical Expense                 Expense
+     Miscellaneous Expense           Expense
+
+     Office Supplies                 Expense
+     Uniforms                        Expense
+
+     Payroll Expenses                Expense
+     Bonus                           Expense
+
+     Christmas Bonus                 Expense
+     Overtime                        Expense
+
+     Penalty and Interest CRA        Expense
+     Professional Fees               Expense
+
+     Reconciliation Discrepancies    Expense
+     Recreational Facilities         Expense
+
+     Rent Expense                    Expense
+     Repairs and Maintenance         Expense
+
+     Small Tools and Equipment       Expense
+     Subcontractor                   Expense
+
+     Telephone Expense               Expense
+     Transportation related fees     Expense
+
+     Travel Expense                  Expense
+     Uncategorized Expenses          Expense
+
+     Utilities                       Expense
+     Vehicle Expenses                Expense
+
+     Fuel                            Expense
+     Lease Expense                   Expense
+
+     Lease Expense FedEx 81533       Expense
+     Licences renewal fee            Expense
+
+     Parking Fee                     Expense
+     Towing Service cost             Expense
+
+     Vehicle Wash and Dry            Expense
+     WSIB Insurance Expense          Expense
+
+     Ask My Accountant               Other Expense
+     Loss on sale of  Asset          Other Expense
+
+     Non Deductible Fines and Penalt Other Expense
+     Estimates                       Non-Posting
+
+     Purchase Orders                 Non-Posting
+
+
+
+  Page 1
+

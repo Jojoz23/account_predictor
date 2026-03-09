@@ -67,6 +67,10 @@ logs/
 
 # Generated extraction/verification outputs (root)
 *_extracted.xlsx
+# Old error/timestamped IIFs (move to archive/ to declutter)
+*_mapped_*.iif
+*_0302*.iif
+*_0226*.iif
 BMO_Verification_Results_*.xlsx
 BMO_*_All_Statements_*.xlsx
 *_combined_*.xlsx

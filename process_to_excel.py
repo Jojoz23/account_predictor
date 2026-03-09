@@ -20,33 +20,60 @@ from standardized_bank_extractors import extract_bank_statement
 from pdf_to_quickbooks import PDFToQuickBooks
 
 
-def process_folder_to_excel(folder_path, output_filename=None):
+def _collect_pdf_paths(paths):
     """
-    Process all PDFs in a folder and create a combined Excel file
-    Automatically detects bank type using standardized extractors
-    
+    Collect PDF file paths from a list of paths (folders and/or individual PDFs).
+    Returns sorted list of Path objects.
+    """
+    pdf_files = []
+    for p in paths:
+        path = Path(p)
+        if not path.exists():
+            print(f"⚠️  Path not found, skipping: {path}")
+            continue
+        if path.is_file():
+            if path.suffix.lower() == '.pdf':
+                pdf_files.append(path)
+            else:
+                print(f"⚠️  Not a PDF, skipping: {path}")
+        else:
+            pdf_files.extend(sorted(path.glob("*.pdf")))
+    return sorted(set(pdf_files))
+
+
+def process_folder_to_excel(folder_path, output_filename=None, pdf_paths=None):
+    """
+    Process PDFs and create a combined Excel file.
+    Accepts either a folder path (all PDFs in folder) or an explicit list of PDF paths.
+    Automatically detects bank type using standardized extractors.
+
     Parameters:
-    - folder_path: Path to folder containing PDF files
+    - folder_path: Optional path to folder containing PDF files (used if pdf_paths is None)
     - output_filename: Optional output filename (default: auto-generated with timestamp)
-    
+    - pdf_paths: Optional list of paths (folders and/or individual PDFs). If given, folder_path is ignored for input (still used for output directory if output_filename is relative).
+
     Returns:
     - Path to the created Excel file, or None if failed
     """
-    folder = Path(folder_path)
-    
-    if not folder.exists():
-        print(f"❌ Folder not found: {folder_path}")
-        return None
-    
-    # Find all PDF files
-    pdf_files = sorted(folder.glob("*.pdf"))
-    
+    if pdf_paths is not None:
+        pdf_files = _collect_pdf_paths(pdf_paths)
+        # Output directory: first path's parent if it's a file, else first path
+        first = Path(pdf_paths[0])
+        out_dir = first.parent if first.is_file() else first
+    else:
+        folder = Path(folder_path)
+        if not folder.exists():
+            print(f"❌ Folder not found: {folder_path}")
+            return None
+        pdf_files = sorted(folder.glob("*.pdf"))
+        out_dir = folder
+
     if not pdf_files:
-        print(f"❌ No PDF files found in: {folder_path}")
+        print(f"❌ No PDF files found.")
         return None
-    
+
     print(f"="*80)
-    print(f"PROCESSING BANK STATEMENTS: {folder.name}")
+    print(f"PROCESSING BANK STATEMENTS: {len(pdf_files)} PDF(s)")
     print(f"="*80)
     print(f"\nFound {len(pdf_files)} PDF file(s)\n")
     
@@ -99,10 +126,11 @@ def process_folder_to_excel(folder_path, output_filename=None):
             
             df = df.copy()
             
-            # Determine if credit card from metadata (set once from first successful extraction)
+            # Per-file account type (batch is_credit_card used for output format; first file sets it)
+            file_is_credit_card = result.metadata.get('is_credit_card', False)
             if is_credit_card is None:
-                is_credit_card = result.metadata.get('is_credit_card', False)
-                print(f"   💳 Detected type: {'Credit Card' if is_credit_card else 'Bank Account'}")
+                is_credit_card = file_is_credit_card
+            print(f"   💳 Detected type: {'Credit Card' if file_is_credit_card else 'Bank Account'}")
             
             # Get opening/closing balance from metadata
             opening_balance = result.metadata.get('opening_balance')
@@ -177,8 +205,8 @@ def process_folder_to_excel(folder_path, output_filename=None):
                     df['Net_Change'] = df['Deposits'].fillna(0) - df['Withdrawals'].fillna(0)
                     df['Running_Balance'] = opening_balance + df['Net_Change'].cumsum()
             
-            # Handle Amount column based on account type
-            if is_credit_card:
+            # Handle Amount column based on this file's account type
+            if file_is_credit_card:
                 # Credit cards should already have Amount column
                 if 'Amount' not in df.columns:
                     print(f"   ⚠️  Warning: Credit card missing Amount column")
@@ -218,14 +246,14 @@ def process_folder_to_excel(folder_path, output_filename=None):
                     df = pipeline.predict_accounts(df)
                     print(f"✅ Account prediction complete")
                     # Invert amounts back for credit cards (for Excel output)
-                    if is_credit_card:
+                    if file_is_credit_card:
                         df['Amount'] = -df['Amount']
                 except Exception as e:
                     print(f"      ⚠️  Account prediction failed: {e}")
                     df['Account'] = 'Uncategorized'
                     df['Confidence'] = 0.0
                     # Invert amounts back if prediction failed
-                    if is_credit_card:
+                    if file_is_credit_card:
                         df['Amount'] = -df['Amount']
             else:
                 df['Account'] = 'Uncategorized'
@@ -323,10 +351,12 @@ def process_folder_to_excel(folder_path, output_filename=None):
     # Generate output filename
     if output_filename is None:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        folder_name = folder.name.replace(" ", "_").replace("-", "_")
-        output_filename = f"{folder_name}_combined_{timestamp}.xlsx"
+        base_name = out_dir.name.replace(" ", "_").replace("-", "_") if pdf_files else "statements"
+        output_filename = f"{base_name}_combined_{timestamp}.xlsx"
     
-    output_path = folder.parent / output_filename
+    output_path = Path(output_filename)
+    if not output_path.is_absolute():
+        output_path = out_dir / output_filename
     
     # Create summary DataFrame
     summary_df = pd.DataFrame(results_summary)
@@ -362,16 +392,22 @@ def process_folder_to_excel(folder_path, output_filename=None):
     
     print(f"✅ Combined Excel file saved: {output_path}")
     print(f"\n📈 Summary:")
+    success_count = len([r for r in results_summary if r['Status'] == 'Success'])
+    warning_count = len([r for r in results_summary if r['Status'] == 'Warning'])
+    fail_count = len([r for r in results_summary if r['Status'] in ('Failed', 'Error')])
     print(f"   Total files processed: {len(pdf_files)}")
-    print(f"   Successful: {len([r for r in results_summary if r['Status'] == 'Success'])}")
-    print(f"   Failed: {len([r for r in results_summary if r['Status'] != 'Success'])}")
+    print(f"   Successful: {success_count}")
+    if warning_count:
+        print(f"   Warnings (balance mismatch): {warning_count}")
+    if fail_count:
+        print(f"   Failed: {fail_count}")
     print(f"   Total transactions: {len(combined_df)}")
     
     return output_path
 
 
 def main():
-    """Main function - can be called with folder path or used interactively"""
+    """Main function - accepts folder path(s) and/or individual PDF path(s)"""
     import argparse
     
     parser = argparse.ArgumentParser(
@@ -381,14 +417,16 @@ def main():
 Examples:
   python process_to_excel.py "data/Scotia- Personal credit card"
   python process_to_excel.py "data/Account Statements CAD - CIBC 4213"
+  python process_to_excel.py "data/pdfs/statement.pdf"
+  python process_to_excel.py "data/pdfs/file1.pdf" "data/pdfs/file2.pdf"
   python process_to_excel.py "data/NB- Company Credit Card 1074" --output "nb_cc_combined.xlsx"
         """
     )
     
     parser.add_argument(
-        'folder_path',
-        nargs='?',
-        help='Path to folder containing PDF files'
+        'paths',
+        nargs='*',
+        help='Folder path(s) and/or individual PDF file path(s)'
     )
     parser.add_argument(
         '--output', '-o',
@@ -398,13 +436,10 @@ Examples:
     
     args = parser.parse_args()
     
-    # If folder path provided, use it; otherwise show usage
-    if args.folder_path:
-        folder_path = args.folder_path
-    else:
+    if not args.paths:
         parser.print_help()
         print("\n" + "="*80)
-        print("Please provide a folder path as an argument")
+        print("Please provide at least one folder path or PDF file path")
         print("="*80)
         return
     
@@ -414,7 +449,15 @@ Examples:
     print("\nThis script processes bank statements using standardized extractors")
     print("and creates a combined Excel file with account predictions.\n")
     
-    output_path = process_folder_to_excel(folder_path, args.output_filename)
+    # Single folder: keep legacy behavior (one path that is a directory)
+    if len(args.paths) == 1:
+        p = Path(args.paths[0])
+        if p.exists() and p.is_dir():
+            output_path = process_folder_to_excel(args.paths[0], args.output_filename)
+        else:
+            output_path = process_folder_to_excel(None, args.output_filename, pdf_paths=args.paths)
+    else:
+        output_path = process_folder_to_excel(None, args.output_filename, pdf_paths=args.paths)
     
     print("\n" + "="*80)
     print("SUMMARY")

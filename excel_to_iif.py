@@ -60,7 +60,6 @@ def excel_to_iif(excel_path, output_path=None, bank_account_name=None, exclude_t
         # Clean up account name to match QuickBooks format
         # "TD bank - 4738" -> "TD 4738"
         # "BMO Business Che 7779" -> "BMO 7779"
-        import re
         # Extract bank name and account number
         bank_match = re.match(r'(.+?)\s*(?:bank|business|che|chequing|checking)\s*[-]?\s*(\d+)', filename_stem, re.IGNORECASE)
         if bank_match:

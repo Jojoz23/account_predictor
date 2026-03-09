@@ -40,6 +40,10 @@ class RBCChequingExtractor(BankExtractorInterface):
                 
                 first_page_text_lower = first_page_text.lower()
                 
+                # Exclude other banks' statements (e.g. TD statement that mentions "RBC VISA" in a transaction)
+                if 'toronto-dominion' in first_page_text_lower or 'td bank' in first_page_text_lower:
+                    return False
+                
                 # Check for RBC indicators
                 has_rbc = 'royal bank' in first_page_text_lower or 'rbc' in first_page_text_lower
                 has_chequing = 'chequing' in first_page_text_lower or 'business account' in first_page_text_lower
