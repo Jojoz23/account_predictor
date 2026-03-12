@@ -373,6 +373,17 @@ Need help?
 
 ---
 
+## Limitations
+
+- This project is a **developer tool**, not a finished consumer product. It assumes you are comfortable with Python, the command line, and QuickBooks Desktop IIF imports.
+- Extractors are **pattern-based and bank-format-specific**. If your bank changes its PDF layout, some statements may fail or need extractor tweaks.
+- AI categorization is **best-effort only**. Always review low-confidence predictions and final IIFs before importing into your accounting system.
+- Only **QuickBooks Desktop** IIF is supported. QuickBooks Online, Xero, Sage, etc. are not supported out of the box.
+- Nothing here is **tax, legal, or accounting advice**. You are responsible for reviewing results and complying with local regulations.
+- All processing is **local only**. If you put sensitive client data into `data/`, keep it out of version control and handle it according to your own privacy standards.
+
+---
+
 **Happy extracting!**
 
 *Transform your bank statements into actionable data in seconds.*
