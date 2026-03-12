@@ -173,15 +173,20 @@ python batch_predict.py transactions.xlsx
 
 ```
 account_predictor/
-├── process_to_excel.py            # PDF folder → combined Excel (bank or credit card)
-├── excel_to_iif.py                # Excel → QuickBooks IIF (bank & credit card)
-├── create_accounts_iif.py         # Excel → IIF account definitions (bank & credit card)
-├── scripts/batch_predict.py       # Predict categories on existing Excel/CSV
-├── extract_bank_statements.py     # Legacy PDF extraction
+├── process_to_excel.py             # PDF folder → combined Excel (bank or credit card)
+├── excel_to_iif.py                 # Excel → QuickBooks IIF (bank & credit card)
+├── update_iif_account_names.py     # Map IIF account names/types from config/Accounts.TXT
 ├── standardized_bank_extractors.py # Bank/credit-card detection and extraction
-├── scripts/streamlit_app.py       # Web UI (Bookeepifier)
-├── setup_pdf_extraction.py        # Dependency installer
-├── extractors/                    # Bank- and card-specific extractors
+├── extract_bank_statements.py      # Legacy PDF extraction
+├── setup_pdf_extraction.py         # Dependency installer
+├── scripts/                        # Optional / batch / web UI / diagnostics / legacy helpers
+│   ├── batch_predict.py, batch_predict_rf.py, batch_predict_simple.py
+│   ├── create_accounts_iif.py, compare_credit_card_excels.py
+│   ├── explore_rbc_savings_camelot.py, explore_td_bank_camelot.py
+│   ├── td_bank_0124_experiment.py
+│   ├── pdf_to_quickbooks.py       # Older end-to-end pipeline (kept for reference)
+│   └── streamlit_app.py           # Web UI (Bookeepifier)
+├── extractors/                     # Bank- and card-specific extractors
 │   ├── td_bank_extractor.py, td_visa_extractor.py
 │   ├── scotiabank_extractor.py, scotia_visa_extractor.py
 │   ├── cibc_bank_extractor.py, nb_bank_extractor.py, nb_company_cc_extractor.py
@@ -189,13 +194,21 @@ account_predictor/
 │   ├── bmo_bank_extractor.py, bmo_credit_card_extractor.py
 │   ├── tangerine_extractor.py, amex_extractor.py, generic_extractor.py
 │   └── __init__.py
+├── config/                         # Per-company QuickBooks config (gitignored)
+│   ├── Accounts.TXT               # QB Chart of Accounts export
+│   ├── Accounts - 980.TXT         # Optional alternate chart
+│   └── account_names_map.csv      # Statement → QB account mapping
+├── data/                           # PDFs / Excels / IIFs (gitignored)
+│   └── ...
+├── archive/                        # Old/working Excels & IIFs (gitignored)
+│   ├── excel/
+│   ├── iif/
+│   └── ...
 ├── notebooks/
 │   ├── 02_model_training.ipynb               # Random Forest model
 │   └── 03_neural_network_training.ipynb      # Neural Network (recommended)
 ├── models/
 │   └── neural_network_account_predictor.pkl  # Trained AI model
-├── data/
-│   └── data_template.csv          # Training data
 └── PDF_EXTRACTION_GUIDE.md        # Detailed extraction docs
 ```
 

@@ -84,3 +84,7 @@ bmo_camelot_test_single.xlsx
 # Client-specific QuickBooks config (per-company)
 config/
 
+# Local archives and session notes (not for git)
+archive/
+docs/cursor_readme_update_and_iff_scripts_cl.md
+
