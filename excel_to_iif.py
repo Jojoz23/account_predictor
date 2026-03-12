@@ -16,6 +16,41 @@ if sys.platform == 'win32':
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
     sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
 
+
+def _normalize_account_key(name: str) -> str:
+    """Normalize an account name for matching (case + whitespace insensitive)."""
+    if not name:
+        return ""
+    # Collapse whitespace and lowercase
+    return re.sub(r"\s+", " ", str(name).strip()).lower()
+
+
+def _load_account_final(excel_file: Path):
+    """
+    Try to load a companion Account_final.txt next to the Excel file.
+    Returns (canonical_list, normalized_lookup) or (None, {}).
+    """
+    txt_path = excel_file.parent / "Account_final.txt"
+    if not txt_path.exists():
+        return None, {}
+
+    accounts = []
+    lookup = {}
+    try:
+        with open(txt_path, "r", encoding="utf-8") as f:
+            for line in f:
+                name = line.strip()
+                if not name:
+                    continue
+                accounts.append(name)
+                lookup[_normalize_account_key(name)] = name
+    except Exception as e:
+        print(f"WARNING: Could not read Account_final.txt: {e}")
+        return None, {}
+
+    print(f"   Using Account_final.txt for canonical account names ({len(accounts)} accounts).")
+    return accounts, lookup
+
 def excel_to_iif(excel_path, output_path=None, bank_account_name=None, exclude_transfers_to_banks=False, skip_account_definitions=False, 
                  date_from=None, date_to=None, exclude_accounts=None, exclude_description_pattern=None, min_amount=None, max_amount=None):
     """
@@ -44,7 +79,10 @@ def excel_to_iif(excel_path, output_path=None, bank_account_name=None, exclude_t
     if not excel_file.exists():
         print(f"ERROR: Excel file not found: {excel_path}")
         return None
-    
+        
+    # Optional per-client account list: Account_final.txt beside the Excel
+    account_final_list, account_final_lookup = _load_account_final(excel_file)
+
     # Generate output path if not provided
     if output_path is None:
         output_path = excel_file.with_suffix('.iif')
@@ -83,12 +121,47 @@ def excel_to_iif(excel_path, output_path=None, bank_account_name=None, exclude_t
         
         # Check what columns we have
         has_amount = 'Amount' in df.columns
-        has_withdrawals = 'Withdrawals' in df.columns
-        has_deposits = 'Deposits' in df.columns
+        # Support multiple naming styles for bank columns
+        withdrawal_col = None
+        deposit_col = None
+        for cand in ['Withdrawals', 'Withdrawal', 'Debit']:
+            if cand in df.columns:
+                withdrawal_col = cand
+                break
+        for cand in ['Deposits', 'Deposit', 'Credit']:
+            if cand in df.columns:
+                deposit_col = cand
+                break
+        has_withdrawals = withdrawal_col is not None
+        has_deposits = deposit_col is not None
         has_account = 'Account' in df.columns
+        # Support either GST or HST column name
+        gst_col_name = None
+        for cand in ['GST', 'HST', 'GST/HST', 'HST/GST']:
+            if cand in df.columns:
+                gst_col_name = cand
+                break
+        has_gst = gst_col_name is not None
         has_date = 'Date' in df.columns
         has_description = 'Description' in df.columns
         has_running_balance = 'Running_Balance' in df.columns
+
+        # Optional extra description column (e.g. payee/name next to description)
+        extra_desc_col = None
+        # Prefer explicit names if present
+        for cand in ['Name', 'Payee', 'Memo']:
+            if cand in df.columns:
+                extra_desc_col = cand
+                break
+        # Otherwise, if there is an unnamed column immediately before Account with data, treat it as extra description
+        if extra_desc_col is None and 'Account' in df.columns:
+            cols = list(df.columns)
+            acc_idx = cols.index('Account')
+            if acc_idx > 0:
+                prev_col = cols[acc_idx - 1]
+                if isinstance(prev_col, str) and prev_col.startswith('Unnamed'):
+                    if df[prev_col].notna().sum() > 0:
+                        extra_desc_col = prev_col
         
         # Derive opening balance from Excel so QuickBooks ending balance matches statement
         # Running_Balance after first tx = opening + Amount[0], so opening = Running_Balance[0] - Amount[0]
@@ -141,6 +214,17 @@ def excel_to_iif(excel_path, output_path=None, bank_account_name=None, exclude_t
                     return True
             return False
         
+        # Helper to map any raw account name to the canonical name from Account_final.txt
+        def map_to_canonical_account(raw_name: str) -> str:
+            name = (raw_name or "").strip()
+            if not name:
+                return name
+            if account_final_lookup:
+                key = _normalize_account_key(name)
+                if key in account_final_lookup:
+                    return account_final_lookup[key]
+            return name
+
         # Collect all unique accounts first
         unique_accounts = set()
         unique_accounts.add(bank_account_name)  # Add bank account
@@ -171,8 +255,19 @@ def excel_to_iif(excel_path, output_path=None, bank_account_name=None, exclude_t
                 
                 date_str = date_val.strftime('%m/%d/%Y')
                 
-                # Get description
-                description = str(row['Description'])[:100] if not pd.isna(row['Description']) else ""
+                # Get description (optionally combine with extra payee/name column)
+                description = str(row['Description']) if not pd.isna(row['Description']) else ""
+                if extra_desc_col is not None:
+                    extra_val = row.get(extra_desc_col)
+                    if extra_val is not None and not pd.isna(extra_val):
+                        extra_text = str(extra_val).strip()
+                        if extra_text:
+                            if description:
+                                description = f"{description} {extra_text}"
+                            else:
+                                description = extra_text
+                # Truncate to 100 chars for IIF
+                description = description[:100]
                 
                 # Description pattern filtering
                 if exclude_description_pattern:
@@ -180,9 +275,10 @@ def excel_to_iif(excel_path, output_path=None, bank_account_name=None, exclude_t
                         continue
                 
                 # Determine transaction type and amount
-                amount = None
+                amount = None         # signed amount from bank/cc perspective
                 trns_type = None
-                account = None
+                account = None        # main category account
+                splits = None         # optional multiple split lines (e.g. net + GST)
                 
                 if has_amount:
                     # Credit card format - single Amount column
@@ -197,23 +293,78 @@ def excel_to_iif(excel_path, output_path=None, bank_account_name=None, exclude_t
                         trns_type = "CREDIT CARD"
                     else:
                         trns_type = "CCARD REFUND"
-                    account = str(row['Account']) if has_account and not pd.isna(row.get('Account')) else "Sales"
+                    # Default blank or missing accounts to "Ask My Accountant"
+                    raw_account = str(row['Account']) if has_account and not pd.isna(row.get('Account')) else "Ask My Accountant"
+                    account = map_to_canonical_account(raw_account)
+
+                    # Optional GST/HST split for credit card charges (same idea as bank path)
+                    if has_gst:
+                        gst_amount = 0.0
+                        gst_val = row.get(gst_col_name)
+                        if gst_val is not None and not pd.isna(gst_val):
+                            try:
+                                gst_amount = float(gst_val)
+                            except (TypeError, ValueError):
+                                gst_amount = 0.0
+                        if gst_amount > 0 and amount > 0:
+                            gross = amount
+                            net = gross - gst_amount
+                            if net < 0:
+                                net = 0.0
+                            gst_account = map_to_canonical_account("GST/HST Payable")
+                            splits = []
+                            if net > 0:
+                                splits.append({'account': account, 'amount': net})
+                            splits.append({'account': gst_account, 'amount': gst_amount})
+                            unique_accounts.add(gst_account)
                     
                 elif has_withdrawals or has_deposits:
-                    # Bank account format - separate Withdrawals/Deposits columns
-                    withdrawal = float(row['Withdrawals']) if has_withdrawals and not pd.isna(row.get('Withdrawals')) else 0.0
-                    deposit = float(row['Deposits']) if has_deposits and not pd.isna(row.get('Deposits')) else 0.0
+                    # Bank account format - separate Withdrawals/Deposits (or Debit/Credit) columns
+                    withdrawal_val = row.get(withdrawal_col) if has_withdrawals else None
+                    deposit_val = row.get(deposit_col) if has_deposits else None
+                    withdrawal = float(withdrawal_val) if (withdrawal_val is not None and not pd.isna(withdrawal_val)) else 0.0
+                    deposit = float(deposit_val) if (deposit_val is not None and not pd.isna(deposit_val)) else 0.0
+                    gst_amount = 0.0
+                    if has_gst:
+                        gst_val = row.get(gst_col_name)
+                        if gst_val is not None and not pd.isna(gst_val):
+                            try:
+                                gst_amount = float(gst_val)
+                            except (TypeError, ValueError):
+                                gst_amount = 0.0
                     
                     if withdrawal > 0:
                         amount = -withdrawal  # Negative for withdrawals
                         trns_type = "CHEQUE"  # Use CHEQUE for withdrawals
-                        account = str(row['Account']) if has_account and not pd.isna(row.get('Account')) else "Sales"
+                        # Default blank or missing accounts to \"Ask My Accountant\"
+                        raw_account = str(row['Account']) if has_account and not pd.isna(row.get('Account')) else "Ask My Accountant"
+                        account = map_to_canonical_account(raw_account)
                     elif deposit > 0:
                         amount = deposit  # Positive for deposits
                         trns_type = "DEPOSIT"
-                        account = str(row['Account']) if has_account and not pd.isna(row.get('Account')) else "Sales"
+                        # Default blank or missing accounts to \"Ask My Accountant\"
+                        raw_account = str(row['Account']) if has_account and not pd.isna(row.get('Account')) else "Ask My Accountant"
+                        account = map_to_canonical_account(raw_account)
                     else:
                         continue  # Skip transactions with no amount
+
+                    # If we have a GST column with a non-zero amount, split the transaction:
+                    #  - net amount to the main expense/income account
+                    #  - GST portion to GST/HST Payable
+                    if gst_amount > 0:
+                        gross = withdrawal if withdrawal > 0 else deposit
+                        if gross <= 0:
+                            pass
+                        else:
+                            net = gross - gst_amount
+                            if net < 0:
+                                net = 0.0
+                            gst_account = map_to_canonical_account("GST/HST Payable")
+                            splits = []
+                            if net > 0:
+                                splits.append({'account': account, 'amount': net})
+                            splits.append({'account': gst_account, 'amount': gst_amount})
+                            unique_accounts.add(gst_account)
                 else:
                     print("ERROR: Excel file must have either 'Amount' column or 'Withdrawals'/'Deposits' columns")
                     return None
@@ -228,9 +379,9 @@ def excel_to_iif(excel_path, output_path=None, bank_account_name=None, exclude_t
                 if max_amount is not None and abs_amount > max_amount:
                     continue
                 
-                # Default account if missing
+                # Default account if somehow still missing
                 if not account or account == 'nan':
-                    account = "Sales"
+                    account = map_to_canonical_account("Ask My Accountant")
                 
                 # Account filtering (check before processing further)
                 if exclude_accounts:
@@ -250,15 +401,21 @@ def excel_to_iif(excel_path, output_path=None, bank_account_name=None, exclude_t
                 
                 # Add accounts to set
                 unique_accounts.add(account)
+                if splits:
+                    for s in splits:
+                        unique_accounts.add(s['account'])
                 
                 # Store transaction data
-                transaction_data.append({
+                tx_entry = {
                     'date_str': date_str,
                     'description': description,
                     'amount': amount,
                     'trns_type': trns_type,
-                    'account': account
-                })
+                    'account': account,
+                }
+                if splits:
+                    tx_entry['splits'] = splits
+                transaction_data.append(tx_entry)
                 
             except Exception as e:
                 print(f"WARNING: Error processing row {idx}: {e}")
@@ -376,27 +533,43 @@ def excel_to_iif(excel_path, output_path=None, bank_account_name=None, exclude_t
             # Clean account name for transaction
             cleaned_account = clean_account_name(tx['account'])
             amt = tx['amount']
+            trns_type = tx['trns_type']
+            splits = tx.get('splits')
             
             # Credit card: IIF kit uses CREDIT CARD (charge) and CCARD REFUND (payment/refund)
             # CREDIT CARD:  TRNS = -amount, SPL = +amount  (charge on card, expense)
             # CCARD REFUND: TRNS = +|amount|, SPL = -|amount|  (credit to card, e.g. payment or refund)
-            if tx['trns_type'] == "CREDIT CARD":
+            if trns_type == "CREDIT CARD":
                 trns_amt = -amt
-                spl_amt = amt
-            elif tx['trns_type'] == "CCARD REFUND":
+                base_sign = 1.0
+            elif trns_type == "CCARD REFUND":
                 abs_amt = abs(amt)
                 trns_amt = abs_amt
-                spl_amt = -abs_amt
+                base_sign = -1.0
             else:
                 trns_amt = amt
-                spl_amt = -amt
+                # For bank/cheque/deposit: withdrawals have amt < 0 (expenses), deposits amt > 0 (income)
+                base_sign = -1.0 if amt > 0 else 1.0
             
             # Create transaction entry
             # TRNS row: source account side
-            iif_content.append(f"TRNS\t{transaction_count}\t{tx['trns_type']}\t{tx['date_str']}\t{cleaned_bank_account}\t\t\t{trns_amt:.2f}\t\t{tx['description']}")
+            iif_content.append(
+                f"TRNS\t{transaction_count}\t{trns_type}\t{tx['date_str']}\t{cleaned_bank_account}\t\t\t{trns_amt:.2f}\t\t{tx['description']}"
+            )
             
-            # SPL row: category account side
-            iif_content.append(f"SPL\t{transaction_count}\t{tx['trns_type']}\t{tx['date_str']}\t{cleaned_account}\t\t\t{spl_amt:.2f}\t\t{tx['description']}")
+            # SPL rows: category side
+            if splits:
+                for split in splits:
+                    split_account = clean_account_name(split['account'])
+                    split_amt = base_sign * float(split['amount'])
+                    iif_content.append(
+                        f"SPL\t{transaction_count}\t{trns_type}\t{tx['date_str']}\t{split_account}\t\t\t{split_amt:.2f}\t\t{tx['description']}"
+                    )
+            else:
+                spl_amt = base_sign * abs(amt)
+                iif_content.append(
+                    f"SPL\t{transaction_count}\t{trns_type}\t{tx['date_str']}\t{cleaned_account}\t\t\t{spl_amt:.2f}\t\t{tx['description']}"
+                )
             
             # End transaction
             iif_content.append("ENDTRNS")

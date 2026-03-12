@@ -1,5 +1,7 @@
 """TD Bank Extractor Implementation"""
 
+import re
+
 import pandas as pd
 from standardized_bank_extractors import BankExtractorInterface, ExtractionResult, standardize_dataframe
 
@@ -10,40 +12,65 @@ class TDBankExtractor(BankExtractorInterface):
     def __init__(self):
         # Import TD bank extraction functions
         try:
-            from test_td_bank_complete import extract_td_bank_statement_camelot
-            self.extract_func = extract_td_bank_statement_camelot
+            # Use the main TD extractor, which now includes a Camelot
+            # summary-table fallback for statements that only show
+            # compact fee summaries (e.g. TD Bank 0124).
+            from test_td_bank_complete import extract_td_bank_statement
+            self.extract_func = extract_td_bank_statement
         except ImportError as e:
             raise ImportError(f"Could not import TD bank extraction functions: {e}")
     
     def detect_bank(self, pdf_path: str) -> bool:
-        """Check if PDF is a TD Bank statement (not Visa)"""
+        """Check if PDF is a TD Bank chequing/savings statement (not Visa)."""
         try:
             import pdfplumber
             with pdfplumber.open(pdf_path) as pdf:
                 text = pdf.pages[0].extract_text() if pdf.pages else ""
                 text_lower = text.lower()
-                
+                # Remove all whitespace (spaces, newlines, tabs) for robust header matching
+                text_nospace = re.sub(r"\s+", "", text_lower)
+
                 # Check for TD Bank indicators (not Visa)
-                has_td = 'td bank' in text_lower or 'toronto-dominion' in text_lower
-                has_account_number = '5044738' in text or '5047206' in text  # TD bank account numbers
-                
+                has_td = (
+                    'td bank' in text_lower
+                    or 'toronto-dominion' in text_lower
+                    or 'tdcanadatrust' in text_nospace
+                )
+
+                # Look for common TD deposit account wording
+                has_deposit_keywords = (
+                    'business chequing account' in text_lower
+                    or 'business checking account' in text_lower
+                    or 'chequing account' in text_lower
+                    or 'chequing acco' in text_lower  # truncated headers
+                    or 'businesschequingaccount' in text_nospace
+                    or 'chequingaccount' in text_nospace
+                )
+
                 # Check if it's actually a Visa STATEMENT (not just mentions "visa" in transactions)
                 # Visa statements have specific patterns like "STATEMENT PERIOD", "PREVIOUS STATEMENT BALANCE", etc.
                 is_visa_statement = (
-                    'statement period' in text_lower and 
-                    ('visa' in text_lower or 'credit card' in text_lower) and
-                    ('previous statement balance' in text_lower or 'previous balance' in text_lower)
+                    'statement period' in text_lower
+                    and ('visa' in text_lower or 'credit card' in text_lower)
+                    and ('previous statement balance' in text_lower or 'previous balance' in text_lower)
                 )
-                
+
                 # Also check for TD Visa specific patterns
                 has_td_visa_pattern = (
-                    'td business' in text_lower or 
-                    'tdbusiness' in text_lower.replace(' ', '') or
-                    'tdvisa' in text_lower.replace(' ', '')
-                ) and 'statement period' in text_lower
-                
-                return has_td and has_account_number and not is_visa_statement and not has_td_visa_pattern
-        except:
+                    (
+                        'td business' in text_lower
+                        or 'tdbusiness' in text_lower.replace(' ', '')
+                        or 'tdvisa' in text_lower.replace(' ', '')
+                    )
+                    and 'statement period' in text_lower
+                )
+
+                # We consider it TD Bank (deposit account) if:
+                #  - It clearly looks like TD
+                #  - It has deposit-account wording (chequing/savings)
+                #  - It does NOT look like a Visa / credit card statement
+                return has_td and has_deposit_keywords and not is_visa_statement and not has_td_visa_pattern
+        except Exception:
             return False
     
     def extract(self, pdf_path: str) -> ExtractionResult:

@@ -238,12 +238,172 @@ def extract_td_bank_statement(pdf_path):
                     
                     transactions.append(transaction)
     
-    # Create DataFrame
+    # Create DataFrame from detailed transaction rows
     df = pd.DataFrame(transactions)
     
     if len(df) == 0:
-        print("  WARNING: No transactions extracted!")
-        return None, None, None, None
+        # No row-level transactions found on the pages. For some TD statements
+        # (like the 0124 account with only a monthly fee), the only data is in
+        # a compact summary table on page 1. Try a Camelot lattice-based
+        # fallback to extract that summary as a single transaction.
+        print("  WARNING: No transactions extracted from pdfplumber tables, trying Camelot summary fallback...")
+        
+        try:
+            tables = camelot.read_pdf(
+                pdf_path,
+                pages="1",
+                flavor="lattice",
+                strip_text="\n",
+            )
+        except Exception as e:
+            print(f"  ERROR: Camelot lattice fallback failed: {e}")
+            return None, None, None, None
+        
+        summary_transactions = []
+        
+        for table in tables:
+            tdf = table.df
+            if tdf.shape[0] < 2 or tdf.shape[1] < 5:
+                continue
+            
+            # Look for a header row with DESCRIPTION / DEBIT / DEPOSIT / DATE / BALANCE
+            header_row = None
+            for i in range(len(tdf)):
+                row_text = " ".join(tdf.iloc[i].astype(str).tolist()).upper()
+                if (
+                    "DESCRIPTION" in row_text
+                    and ("DEBIT" in row_text or "CHEQUE" in row_text)
+                    and ("DEPOSIT" in row_text or "CREDIT" in row_text)
+                    and "DATE" in row_text
+                    and "BALANCE" in row_text
+                ):
+                    header_row = i
+                    break
+            
+            if header_row is None:
+                continue
+            
+            # Column positions in this summary layout:
+            # DESCRIPTION / CHEQUE/DEBIT / DEPOSIT/CREDIT / DATE / BALANCE
+            desc_col = 0
+            debit_col = 1
+            credit_col = 2
+            date_col = 3
+            balance_col = 4
+            
+            print(f"  Camelot fallback using summary table on page {table.page} (rows={tdf.shape[0]}, cols={tdf.shape[1]})")
+            
+            for row_idx in range(header_row + 1, len(tdf)):
+                row = tdf.iloc[row_idx].tolist()
+                raw_desc = str(row[desc_col]) if desc_col < len(row) else ""
+                if not raw_desc.strip():
+                    continue
+                
+                desc_upper = raw_desc.upper()
+                clean_desc = raw_desc.strip()
+                
+                # Opening/closing balance from BALANCE FORWARD row, if present
+                if "BALANCE FORWARD" in desc_upper:
+                    bal_text = str(row[balance_col]) if balance_col < len(row) else ""
+                    bal_text = bal_text.replace(",", "").replace("$", "")
+                    parts = re.findall(r"-?\d+\.\d{2}", bal_text)
+                    if parts:
+                        try:
+                            opening_balance = float(parts[0])
+                            closing_balance = float(parts[-1])
+                            print(f"    Fallback Opening Balance: ${opening_balance:,.2f}")
+                            print(f"    Fallback Closing Balance: ${closing_balance:,.2f}")
+                        except Exception:
+                            pass
+                    # If this row also contains a fee description, let it fall through
+                    # to become a transaction; otherwise skip it.
+                    if "MONTHLY PLAN FEE" not in desc_upper:
+                        continue
+                
+                # Skip non-transaction summary rows
+                if any(
+                    kw in desc_upper
+                    for kw in ["NEXT STATEMENT", "DEP CONTENT", "ITEMS", "UNC BATCH", "CREDITS", "DEBITS"]
+                ):
+                    continue
+                
+                withdrawal = None
+                deposit = None
+                
+                if debit_col < len(row) and row[debit_col]:
+                    try:
+                        withdrawal = float(str(row[debit_col]).replace(",", "").replace("$", ""))
+                    except Exception:
+                        withdrawal = None
+                
+                if credit_col < len(row) and row[credit_col]:
+                    try:
+                        deposit = float(str(row[credit_col]).replace(",", "").replace("$", ""))
+                    except Exception:
+                        deposit = None
+                
+                # Skip if no amounts
+                if withdrawal is None and deposit is None:
+                    continue
+                
+                # Parse date from the DATE column, e.g. "NOV28DEC31" → take last month+day
+                raw_date = str(row[date_col]) if date_col < len(row) else ""
+                raw_date_clean = raw_date.replace(" ", "").upper()
+                md_matches = re.findall(r"[A-Z]{3}\d{1,2}", raw_date_clean)
+                date_str_formatted = raw_date
+                if md_matches and statement_end_year:
+                    month_day = md_matches[-1]
+                    mm = re.match(r"([A-Z]{3})(\d{1,2})", month_day)
+                    if mm:
+                        mon = mm.group(1)
+                        day = int(mm.group(2))
+                        month_num = {
+                            "JAN": 1,
+                            "FEB": 2,
+                            "MAR": 3,
+                            "APR": 4,
+                            "MAY": 5,
+                            "JUN": 6,
+                            "JUL": 7,
+                            "AUG": 8,
+                            "SEP": 9,
+                            "OCT": 10,
+                            "NOV": 11,
+                            "DEC": 12,
+                        }.get(mon)
+                        if month_num:
+                            try:
+                                dt = datetime(statement_end_year, month_num, day)
+                                date_str_formatted = dt.strftime("%Y-%m-%d")
+                            except Exception:
+                                date_str_formatted = month_day
+                        else:
+                            date_str_formatted = month_day
+                
+                # Clean up description so it doesn't look like an opening-balance row
+                # to downstream filters. If the description still contains the
+                # "BALANCE FORWARD" text, strip it off and keep the fee/charge part.
+                if "BALANCE FORWARD" in clean_desc.upper():
+                    clean_desc = re.sub(r"(?i)balance\s*forward", "", clean_desc).strip()
+                    if not clean_desc:
+                        clean_desc = raw_desc.strip()
+
+                summary_transactions.append(
+                    {
+                        "Date": date_str_formatted,
+                        "Description": clean_desc,
+                        "Withdrawals": withdrawal if withdrawal is not None else 0.0,
+                        "Deposits": deposit if deposit is not None else 0.0,
+                        "Balance": None,
+                    }
+                )
+        
+        if not summary_transactions:
+            print("  WARNING: No transactions extracted (even with Camelot fallback).")
+            return None, None, None, None
+        
+        df = pd.DataFrame(summary_transactions)
+        print(f"\n  Fallback extracted {len(df)} summary transaction(s)")
     
     print(f"\n  Extracted {len(df)} transactions")
     
