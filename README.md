@@ -1,4 +1,4 @@
-# 🧠 AI-Powered Bank Statement Processor
+# AI-Powered Bank Statement Processor
 
 **Automatically extract, categorize, and export bank and credit card transactions using machine learning.**
 
@@ -6,21 +6,21 @@ Transform PDF statements into categorized Excel and QuickBooks-ready data in sec
 
 ---
 
-## ✨ Features
+## Features
 
-- 📄 **PDF to Excel** - Extract transactions from PDF statements into Excel (single file or folder batch)
-- 🏦 **Bank & Credit Card** - Works with both bank accounts and credit cards (auto-detected)
-- 🏛️ **Multi-Bank Support** - TD, Scotiabank, Tangerine, CIBC, National Bank, RBC, BMO, AMEX, and more
-- 🤖 **AI Categorization** - Neural network predicts QuickBooks account categories with high accuracy
-- 📊 **Excel Export** - Multi-sheet Excel (Transactions, Summary, By Account) with confidence scores
-- 💼 **QuickBooks IIF** - Convert Excel to IIF for import into QuickBooks Desktop (bank and credit card)
-- 🎯 **Confidence Scores** - Know which predictions to review
-- 🔄 **Batch Processing** - Process entire folders of PDFs; batch convert Excel files to IIF
-- 🌐 **Web App** - [Bookeepifier](https://bookeepifier.streamlit.app/) — upload PDFs, get Excel + QuickBooks IIF (same IIF script as CLI)
+- **PDF to Excel** - Extract transactions from PDF statements into Excel (single file or folder batch)
+- **Bank & Credit Card** - Works with both bank accounts and credit cards (auto-detected)
+- **Multi-Bank Support** - TD, Scotiabank, Tangerine, CIBC, National Bank, RBC, BMO, AMEX, and more
+- **AI Categorization** - Neural network predicts QuickBooks account categories with high accuracy
+- **Excel Export** - Multi-sheet Excel (Transactions, Summary, By Account) with confidence scores
+- **QuickBooks IIF** - Convert Excel to IIF for import into QuickBooks Desktop (bank and credit card)
+- **Confidence Scores** - Know which predictions to review
+- **Batch Processing** - Process entire folders of PDFs; batch convert Excel files to IIF
+- **Web App** - [Bookeepifier](https://bookeepifier.streamlit.app/) — upload PDFs, get Excel + QuickBooks IIF (same IIF script as CLI)
 
 ---
 
-## 🚀 Quick Start
+## Quick Start
 
 ### 1. Install Dependencies
 
@@ -73,7 +73,7 @@ jupyter notebook
 
 ---
 
-## 📋 What You Get
+## What You Get
 
 ### Input
 - **PDFs:** Bank or credit card statement PDFs (single file or folder)
@@ -94,7 +94,7 @@ jupyter notebook
 
 ---
 
-## 📊 Example Results
+## Example Results
 
 | Date | Description | Amount | Account | Confidence |
 |------|-------------|--------|---------|------------|
@@ -105,7 +105,7 @@ jupyter notebook
 
 ---
 
-## 🎯 Usage Scenarios
+## Usage Scenarios
 
 ### Scenario 1: PDF folder → Excel (main flow)
 
@@ -148,15 +148,15 @@ python batch_predict.py transactions.xlsx
 
 ---
 
-## 🏦 Supported Banks & Credit Cards
+## Supported Banks & Credit Cards
 
-✅ **Bank accounts:** TD, Scotiabank, Tangerine, CIBC, National Bank, RBC Chequing, BMO  
-✅ **Credit cards:** TD Visa, Scotia Visa, RBC Mastercard, BMO Credit Card, National Bank Company Credit Card, AMEX (Amex Bank of Canada)  
-✅ **Generic fallback** for other table-based PDF statements.
+- **Bank accounts:** TD, Scotiabank, Tangerine, CIBC, National Bank, RBC Chequing, BMO  
+- **Credit cards:** TD Visa, Scotia Visa, RBC Mastercard, BMO Credit Card, National Bank Company Credit Card, AMEX (Amex Bank of Canada)  
+- **Generic fallback** for other table-based PDF statements.
 
 ---
 
-## 🧠 AI Model Performance
+## AI Model Performance
 
 - **Accuracy:** 86.9% on test data
 - **Training Data:** 5,600+ categorized transactions
@@ -169,7 +169,7 @@ python batch_predict.py transactions.xlsx
 
 ---
 
-## 📁 Project Structure
+## Project Structure
 
 ```
 account_predictor/
@@ -179,6 +179,7 @@ account_predictor/
 ├── standardized_bank_extractors.py # Bank/credit-card detection and extraction
 ├── extract_bank_statements.py      # Legacy PDF extraction
 ├── setup_pdf_extraction.py         # Dependency installer
+├── test_*_complete.py              # Per-bank/card extraction modules used by extractors
 ├── scripts/                        # Optional / batch / web UI / diagnostics / legacy helpers
 │   ├── batch_predict.py, batch_predict_rf.py, batch_predict_simple.py
 │   ├── create_accounts_iif.py, compare_credit_card_excels.py
@@ -214,7 +215,7 @@ account_predictor/
 
 ---
 
-## 🔧 Advanced Usage
+## Advanced Usage
 
 ### QuickBooks IIF: bank and credit card
 
@@ -255,7 +256,7 @@ needs_review.to_excel('review_needed.xlsx', index=False)
 
 ---
 
-## 🛠️ Troubleshooting
+## Troubleshooting
 
 ### "No transactions extracted"
 - Ensure PDF is not password-protected
@@ -276,7 +277,7 @@ needs_review.to_excel('review_needed.xlsx', index=False)
 
 ---
 
-## 📈 Improving Accuracy
+## Improving Accuracy
 
 1. **Add More Training Data**
    - More examples = better predictions
@@ -293,16 +294,16 @@ needs_review.to_excel('review_needed.xlsx', index=False)
 
 ---
 
-## 🔐 Privacy & Security
+## Privacy & Security
 
-- ✅ **100% Local Processing** - All data stays on your computer
-- ✅ **No Cloud Services** - No external API calls
-- ✅ **No Data Transmission** - Your financial data never leaves your machine
-- ✅ **Open Source** - Review the code yourself
+- **100% Local Processing** - All data stays on your computer
+- **No Cloud Services** - No external API calls
+- **No Data Transmission** - Your financial data never leaves your machine
+- **Open Source** - Review the code yourself
 
 ---
 
-## 📚 Documentation
+## Documentation
 
 - **[PDF Extraction Guide](PDF_EXTRACTION_GUIDE.md)** - PDF extraction details
 - **[Adding a New Bank](ADDING_NEW_BANK_GUIDE.md)** - How to add new bank/credit card extractors
@@ -311,7 +312,7 @@ needs_review.to_excel('review_needed.xlsx', index=False)
 
 ---
 
-## 🎓 How It Works
+## How It Works
 
 1. **PDF → Excel (`process_to_excel.py`)**
    - **Standardized extractors** detect bank or credit card from PDF content (TD, Scotia, CIBC, RBC, BMO, Tangerine, National Bank, AMEX, etc.).
@@ -328,7 +329,7 @@ needs_review.to_excel('review_needed.xlsx', index=False)
 
 ---
 
-## 🤝 Contributing
+## Contributing
 
 Contributions welcome! Areas for improvement:
 - Additional bank format support
@@ -338,13 +339,13 @@ Contributions welcome! Areas for improvement:
 
 ---
 
-## 📄 License
+## License
 
 MIT License - Feel free to use for personal or commercial projects.
 
 ---
 
-## 🎉 Success Stories
+## Success Stories
 
 > "Went from 4 hours of manual data entry to 5 minutes. Game changer!" - Small Business Owner
 
@@ -354,7 +355,7 @@ MIT License - Feel free to use for personal or commercial projects.
 
 ---
 
-## 💡 Tips
+## Tips
 
 - **Start Small:** Test with one statement before processing in bulk
 - **Review Confidence:** Always check predictions <80% confidence
@@ -363,7 +364,7 @@ MIT License - Feel free to use for personal or commercial projects.
 
 ---
 
-## 📞 Support
+## Support
 
 Need help?
 1. Check `PDF_EXTRACTION_GUIDE.md` for detailed instructions
@@ -372,6 +373,6 @@ Need help?
 
 ---
 
-**Happy extracting! 🚀**
+**Happy extracting!**
 
 *Transform your bank statements into actionable data in seconds.*
