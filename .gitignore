@@ -81,3 +81,6 @@ google_output*
 bmo_test_output.xlsx
 bmo_camelot_test_single.xlsx
 
+# Client-specific QuickBooks config (per-company)
+config/
+

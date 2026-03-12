@@ -15,7 +15,7 @@ Organized so the **root stays minimal** and scripts still work from the project 
 | `standardized_bank_extractors.py` | Routes PDFs to the right bank/card extractor |
 | `extract_bank_statements.py` | Fallback PDF extractor (used by generic extractor) |
 | `pdf_to_quickbooks.py` | AI account prediction pipeline |
-| `batch_predict*.py`, `create_accounts_iif.py`, `compare_credit_card_excels.py`, `streamlit_app.py` | Optional / batch / web UI |
+| `scripts/batch_predict*.py`, `scripts/create_accounts_iif.py`, `scripts/compare_credit_card_excels.py`, `scripts/streamlit_app.py` | Optional / batch / web UI |
 | `extractors/` | Per-bank PDF extractors (BMO, TD, Scotia, etc.) |
 | `tools/` | Utilities (e.g. `analyze_statement.py`) |
 | `notebooks/` | Jupyter notebooks |

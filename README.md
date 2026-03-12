@@ -176,10 +176,10 @@ account_predictor/
 ├── process_to_excel.py            # PDF folder → combined Excel (bank or credit card)
 ├── excel_to_iif.py                # Excel → QuickBooks IIF (bank & credit card)
 ├── create_accounts_iif.py         # Excel → IIF account definitions (bank & credit card)
-├── batch_predict.py               # Predict categories on existing Excel/CSV
+├── scripts/batch_predict.py       # Predict categories on existing Excel/CSV
 ├── extract_bank_statements.py     # Legacy PDF extraction
 ├── standardized_bank_extractors.py # Bank/credit-card detection and extraction
-├── streamlit_app.py               # Web UI (Bookeepifier)
+├── scripts/streamlit_app.py       # Web UI (Bookeepifier)
 ├── setup_pdf_extraction.py        # Dependency installer
 ├── extractors/                    # Bank- and card-specific extractors
 │   ├── td_bank_extractor.py, td_visa_extractor.py
