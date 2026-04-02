@@ -14,8 +14,9 @@ Organized so the **root stays minimal** and scripts still work from the project 
 | `remove_duplicate_transfers.py` | Strip duplicate transfers between bank and card IIFs |
 | `standardized_bank_extractors.py` | Routes PDFs to the right bank/card extractor |
 | `extract_bank_statements.py` | Fallback PDF extractor (used by generic extractor) |
-| `pdf_to_quickbooks.py` | AI account prediction pipeline |
-| `scripts/batch_predict*.py`, `scripts/create_accounts_iif.py`, `scripts/compare_credit_card_excels.py`, `scripts/streamlit_app.py` | Optional / batch / web UI |
+| `scripts/pdf_to_quickbooks.py` | AI account prediction pipeline |
+| `streamlit_app.py` | Web UI (Bookeepifier; adds `scripts/` to path for that import) |
+| `scripts/batch_predict*.py`, `scripts/create_accounts_iif.py`, `scripts/compare_credit_card_excels.py` | Optional / batch helpers |
 | `extractors/` | Per-bank PDF extractors (BMO, TD, Scotia, etc.) |
 | `tools/` | Utilities (e.g. `analyze_statement.py`) |
 | `notebooks/` | Jupyter notebooks |

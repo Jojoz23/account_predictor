@@ -34,7 +34,7 @@ git push -u origin main
 No environment variables required - everything is self-contained!
 
 ## 📁 Files Included in Deployment
-- ✅ `streamlit_app.py` - Main app
+- ✅ `streamlit_app.py` - Main app (repo root)
 - ✅ `pdf_to_quickbooks.py` - Processing pipeline
 - ✅ `extract_bank_statements.py` - PDF extraction
 - ✅ `models/neural_network_account_predictor.pkl` - AI model

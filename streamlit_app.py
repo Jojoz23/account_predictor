@@ -7,17 +7,24 @@ Live app: https://bookeepifier.streamlit.app/
 2. Download Excel and QuickBooks IIF (IIF generated via excel_to_iif script; works for bank and credit card)
 """
 
+import sys
+from pathlib import Path
+
+# pdf_to_quickbooks lives in scripts/; other deps are at repo root
+_ROOT = Path(__file__).resolve().parent
+_SCRIPTS = _ROOT / "scripts"
+for _p in (_ROOT, _SCRIPTS):
+    _s = str(_p)
+    if _s not in sys.path:
+        sys.path.insert(0, _s)
+
 import streamlit as st
 import pandas as pd
-import os
-import sys
 import tempfile
 import contextlib
-from pathlib import Path
 from pdf_to_quickbooks import PDFToQuickBooks
 from standardized_bank_extractors import extract_bank_statement
 from excel_to_iif import excel_to_iif
-import zipfile
 import io
 
 # Page configuration

@@ -174,6 +174,7 @@ python batch_predict.py transactions.xlsx
 ```
 account_predictor/
 ├── process_to_excel.py             # PDF folder → combined Excel (bank or credit card)
+├── streamlit_app.py                # Web UI (Bookeepifier)
 ├── excel_to_iif.py                 # Excel → QuickBooks IIF (bank & credit card)
 ├── update_iif_account_names.py     # Map IIF account names/types from config/Accounts.TXT
 ├── standardized_bank_extractors.py # Bank/credit-card detection and extraction
@@ -185,8 +186,7 @@ account_predictor/
 │   ├── create_accounts_iif.py, compare_credit_card_excels.py
 │   ├── explore_rbc_savings_camelot.py, explore_td_bank_camelot.py
 │   ├── td_bank_0124_experiment.py
-│   ├── pdf_to_quickbooks.py       # Older end-to-end pipeline (kept for reference)
-│   └── streamlit_app.py           # Web UI (Bookeepifier)
+│   └── pdf_to_quickbooks.py       # Older end-to-end pipeline (kept for reference)
 ├── extractors/                     # Bank- and card-specific extractors
 │   ├── td_bank_extractor.py, td_visa_extractor.py
 │   ├── scotiabank_extractor.py, scotia_visa_extractor.py
