@@ -33,12 +33,11 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Hide Streamlit branding (menu, footer, header)
+# Keep header + main menu visible so users can open Settings → Theme (light / dark / system).
+# Only hide the footer “Made with Streamlit” strip.
 hide_streamlit_style = """
 <style>
-#MainMenu {visibility: hidden;}
 footer {visibility: hidden;}
-header {visibility: hidden;}
 </style>
 """
 st.markdown(hide_streamlit_style, unsafe_allow_html=True)
