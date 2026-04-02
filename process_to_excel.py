@@ -13,8 +13,17 @@ if sys.platform == 'win32':
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
     sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
 
-import pandas as pd
 from pathlib import Path
+
+# pdf_to_quickbooks lives in scripts/; other deps are at repo root
+_ROOT = Path(__file__).resolve().parent
+_SCRIPTS = _ROOT / "scripts"
+for _p in (_ROOT, _SCRIPTS):
+    _s = str(_p)
+    if _s not in sys.path:
+        sys.path.insert(0, _s)
+
+import pandas as pd
 from datetime import datetime
 from standardized_bank_extractors import extract_bank_statement
 from pdf_to_quickbooks import PDFToQuickBooks
