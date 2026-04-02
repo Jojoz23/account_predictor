@@ -1,8 +1,6 @@
 """
 Bank Statement PDF to Excel & QuickBooks IIF - Streamlit Web App
 
-Live app: https://bookeepifier.streamlit.app/
-
 1. Upload PDFs (bank or credit card) → extraction + AI categorization
 2. Download Excel and QuickBooks IIF (IIF generated via excel_to_iif script; works for bank and credit card)
 """
@@ -103,7 +101,7 @@ def _generate_iif_from_dataframe(df, bank_account_name="Bookeepifier Statements"
 def main():
     # Header
     st.title("Bookeepifier")
-    st.markdown("Upload PDF bank or credit card statements → AI categorizes → Download Excel & QuickBooks IIF · [Live app](https://bookeepifier.streamlit.app/)")
+    st.markdown("Upload PDF bank or credit card statements → AI categorizes → Download Excel & QuickBooks IIF")
     
     st.divider()
     
@@ -219,7 +217,6 @@ def main():
         st.divider()
         st.info("Upload PDF bank or credit card statements above to get started")
         st.markdown("""
-        **Live app:** [bookeepifier.streamlit.app](https://bookeepifier.streamlit.app/)  
         **Supported:** RBC, TD, BMO, Scotiabank, CIBC, Tangerine, National Bank, AMEX (bank & credit card)  
         **Download:** Excel + QuickBooks IIF (same IIF script as `excel_to_iif.py` — works for both account types)
         """)
