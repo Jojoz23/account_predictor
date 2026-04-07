@@ -25,9 +25,7 @@ from pathlib import Path
 import sys
 
 
-# Accounts in QuickBooks that use Sales Tax Code H
-# (bank chequing + credit card), based on your setup
-H_ACCOUNTS = {
+DEFAULT_H_ACCOUNTS = {
     "Office Supplies",
     "Repairs and Maintenance",
     "Telephone Expense",
@@ -49,7 +47,34 @@ def parse_amount(text: str) -> float:
         return 0.0
 
 
-def adjust_file(input_path: str, output_path: str) -> None:
+def load_h_accounts(config_path: str | None = None) -> set[str]:
+    """Load H-coded accounts from config file, with safe fallback."""
+    if config_path:
+        path = Path(config_path)
+    else:
+        repo_root = Path(__file__).resolve().parent.parent
+        path = repo_root / "config" / "h_accounts.txt"
+
+    if not path.exists():
+        print(f"WARNING: H accounts config not found at {path}, using defaults.")
+        return set(DEFAULT_H_ACCOUNTS)
+
+    accounts: set[str] = set()
+    for line in path.read_text(encoding="utf-8").splitlines():
+        name = line.strip()
+        if not name or name.startswith("#"):
+            continue
+        accounts.add(name)
+
+    if not accounts:
+        print(f"WARNING: No H accounts found in {path}, using defaults.")
+        return set(DEFAULT_H_ACCOUNTS)
+
+    print(f"Loaded {len(accounts)} H account(s) from {path}")
+    return accounts
+
+
+def adjust_file(input_path: str, output_path: str, h_accounts: set[str]) -> None:
     src = Path(input_path)
     dst = Path(output_path)
 
@@ -106,7 +131,7 @@ def adjust_file(input_path: str, output_path: str) -> None:
             if len(parts) < 8:
                 continue
             acc_name = parts[4]
-            if acc_name in H_ACCOUNTS:
+            if acc_name in h_accounts:
                 h_spl_indices.append(i)
             elif acc_name == GST_ACCOUNT_NAME:
                 gst_spl_indices.append(i)
@@ -149,6 +174,25 @@ def adjust_file(input_path: str, output_path: str) -> None:
 
 
 def main(argv=None) -> None:
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="Adjust H-coded IIF splits to avoid duplicate GST/HST."
+    )
+    parser.add_argument("input_iif", help="Input IIF file")
+    parser.add_argument("output_iif", help="Output IIF file")
+    parser.add_argument(
+        "--h-accounts",
+        default=None,
+        help="Optional path to h_accounts.txt (default: config/h_accounts.txt)",
+    )
+    args = parser.parse_args(argv or sys.argv[1:])
+
+    h_accounts = load_h_accounts(args.h_accounts)
+    adjust_file(args.input_iif, args.output_iif, h_accounts)
+    return
+
+def _legacy_main(argv=None) -> None:
     argv = argv or sys.argv[1:]
     if len(argv) != 2:
         print(
@@ -156,7 +200,7 @@ def main(argv=None) -> None:
             "<input.iif> <output.iif>"
         )
         sys.exit(1)
-    adjust_file(argv[0], argv[1])
+    adjust_file(argv[0], argv[1], load_h_accounts(None))
 
 
 if __name__ == "__main__":

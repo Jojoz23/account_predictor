@@ -45,6 +45,19 @@ python excel_to_iif.py path/to/combined.xlsx
 # Optional: -o output.iif  -a "My Account Name"  --exclude-transfers  --skip-accounts
 ```
 
+### Real-World IIF Sequence
+
+```bash
+# 1) One-command pipeline (Excel -> mapped IIF -> transfer cleanup -> H-net)
+python tools/run_iif_pipeline.py --excel "data/iif/114 - lovely/TD Visa - 6157.xlsx" --qb-account "TD Visa - 6157" --map-file "data/iif/114 - lovely/account_names_map_114.csv" --accounts-txt "data/iif/114 - lovely/Accounts.TXT" --transfer-mode visa_td5931 --visa-account "TD Visa - 6157" --td5931-account "TD BANK - 5931"
+
+# 2) Bank/card generic transfer cleanup mode (when using a separate bank IIF)
+python tools/run_iif_pipeline.py --excel "data/iif/114 - lovely/BMO Credit Card 2589.xlsx" --qb-account "BMO World Elite Mastercard 2589" --bank-iif "data/iif/114 - lovely/BMO Business Che 7779_final.iif" --card-account "BMO World Elite Mastercard 2589" --bank-account "BMO-7779"
+
+# 3) Optional: AI fill only blank Account cells
+python scripts/batch_predict.py "data/iif/114 - lovely/TD Bank - 5931.xlsx" --blank-account-only
+```
+
 ### 4. Web UI
 
 **Live app:** [bookeepifier.streamlit.app](https://bookeepifier.streamlit.app/) — upload PDFs, download Excel and QuickBooks IIF (bank or credit card). IIF is generated with the same `excel_to_iif` script.

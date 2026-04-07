@@ -60,7 +60,7 @@ def create_features(df):
     
     return df
 
-def predict_batch(input_file, output_file=None):
+def predict_batch(input_file, output_file=None, blank_account_only=False):
     """
     Predict account categories for a batch of transactions
     
@@ -187,21 +187,57 @@ def predict_batch(input_file, output_file=None):
         df = df[~amount_na]
     
     print(f"📊 Processing {len(df)} valid transactions")
+
+    prediction_mask = pd.Series(True, index=df.index)
+    if blank_account_only:
+        if 'Account' not in df.columns:
+            print("⚠️ --blank-account-only requested but 'Account' column is missing; predicting all rows.")
+        else:
+            account_text = df['Account'].fillna('').astype(str).str.strip()
+            prediction_mask = account_text.eq('') | account_text.str.lower().eq('nan')
+            blank_count = int(prediction_mask.sum())
+            print(f"🧩 Blank-account-only mode: predicting {blank_count} row(s), keeping existing Account values on others.")
+            if blank_count == 0:
+                print("✅ No blank Account rows found; nothing to predict.")
+                # Still write an output file for consistency
+                df['Predicted_Account'] = df['Account'].fillna('')
+                df['Confidence'] = 1.0
+                df['Top_3_Predictions'] = [[(str(a), 1.0), (str(a), 0.0), (str(a), 0.0)] for a in df['Predicted_Account']]
+                if output_file is None:
+                    if input_file.endswith('.xlsx'):
+                        output_file = input_file.replace('.xlsx', '_predicted.xlsx')
+                    elif input_file.endswith('.xls'):
+                        output_file = input_file.replace('.xls', '_predicted.xlsx')
+                    elif input_file.endswith('.csv'):
+                        output_file = input_file.replace('.csv', '_predicted.csv')
+                    else:
+                        output_file = input_file + '_predicted.xlsx'
+                output_df = df.copy()
+                try:
+                    if output_file.endswith('.xlsx'):
+                        output_df.to_excel(output_file, index=False)
+                    else:
+                        output_df.to_csv(output_file, index=False)
+                    print(f"✅ Results saved successfully to: {output_file}")
+                except Exception as e:
+                    print(f"❌ Error saving results: {e}")
+                return
     
-    # Create features
-    df = create_features(df)
+    # Create features only for rows being predicted
+    df_to_predict = df[prediction_mask].copy()
+    df_to_predict = create_features(df_to_predict)
     
     # Create TF-IDF features
     print("Creating TF-IDF features...")
-    tfidf_matrix = tfidf.transform(df['Description_Clean'])
+    tfidf_matrix = tfidf.transform(df_to_predict['Description_Clean'])
     tfidf_df = pd.DataFrame(
         tfidf_matrix.toarray(),
         columns=[f'tfidf_{word}' for word in tfidf.get_feature_names_out()],
-        index=df.index
+        index=df_to_predict.index
     )
     
     # Combine features
-    X_basic = df[basic_features].copy()
+    X_basic = df_to_predict[basic_features].copy()
     X_combined = pd.concat([X_basic, tfidf_df], axis=1)
 
     X_combined = X_combined.reindex(columns=feature_columns_full, fill_value=0)
@@ -218,17 +254,24 @@ def predict_batch(input_file, output_file=None):
     confidences = np.max(predictions_proba, axis=1)
     
     # Add predictions to dataframe
-    df['Predicted_Account'] = predictions
-    df['Confidence'] = confidences
+    if blank_account_only and 'Account' in df.columns:
+        df['Predicted_Account'] = df['Account'].fillna('').astype(str)
+        df['Confidence'] = 1.0
+        df.loc[prediction_mask, 'Predicted_Account'] = predictions
+        df.loc[prediction_mask, 'Confidence'] = confidences
+    else:
+        df['Predicted_Account'] = predictions
+        df['Confidence'] = confidences
     
     # Get top 3 predictions for each transaction
-    top_3_predictions = []
+    top_3_predictions = {}
     for i, proba in enumerate(predictions_proba):
         top_3_idx = np.argsort(proba)[-3:][::-1]
         top_3 = [(class_names[idx], proba[idx]) for idx in top_3_idx]
-        top_3_predictions.append(top_3)
-    
-    df['Top_3_Predictions'] = top_3_predictions
+        top_3_predictions[df_to_predict.index[i]] = top_3
+
+    default_top3 = [("Existing Account", 1.0), ("", 0.0), ("", 0.0)]
+    df['Top_3_Predictions'] = [top_3_predictions.get(idx, default_top3) for idx in df.index]
     
     # Display results
     print("\n🎯 PREDICTION RESULTS:")
@@ -305,18 +348,16 @@ def predict_batch(input_file, output_file=None):
     print(f"📈 Average confidence: {df['Confidence'].mean():.1%}")
 
 if __name__ == "__main__":
-    import sys
-    
-    if len(sys.argv) < 2:
-        print("Usage: python batch_predict.py <input_file> [output_file]")
-        print("Example: python batch_predict.py data/Bookkeeping 2025.xlsx")
-        print("Example: python batch_predict.py data/transactions.csv data/results.xlsx")
-        print("\nSupported formats:")
-        print("  - Bookkeeping format: Date, Description, Withdrawals, Deposits, Balance")
-        print("  - Standard format: Date, Description, Amount")
-        sys.exit(1)
-    
-    input_file = sys.argv[1]
-    output_file = sys.argv[2] if len(sys.argv) > 2 else None
-    
-    predict_batch(input_file, output_file)
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Batch account predictor")
+    parser.add_argument("input_file", help="Input Excel/CSV file")
+    parser.add_argument("output_file", nargs="?", default=None, help="Optional output file")
+    parser.add_argument(
+        "--blank-account-only",
+        action="store_true",
+        help="Only predict rows where Account is blank; keep existing Account classifications untouched.",
+    )
+    args = parser.parse_args()
+
+    predict_batch(args.input_file, args.output_file, blank_account_only=args.blank_account_only)
