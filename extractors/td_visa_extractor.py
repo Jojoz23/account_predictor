@@ -23,8 +23,13 @@ def extract_td_visa_statement(pdf_path: str):
     closing_balance = None
     statement_start_year = None
     statement_end_year = None
+    # Some TD Visa statements place transaction headers around row ~20 on page 1.
+    # Keep this comfortably above 20 to avoid missing valid header rows.
+    header_scan_limit = 80
     
     # Step 1: Extract year from statement period
+    month_pattern = r'(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)'
+    statement_period_pattern = rf'({month_pattern})\.?\s*(\d{{1,2}}),\s*(\d{{4}})\s*to\s*({month_pattern})\.?\s*(\d{{1,2}}),\s*(\d{{4}})'
     tables_stream = camelot.read_pdf(pdf_path, pages="1", flavor="stream")
     
     for table_idx, table in enumerate(tables_stream):
@@ -33,22 +38,34 @@ def extract_td_visa_statement(pdf_path: str):
             row = df.iloc[idx]
             row_text = ' '.join([str(cell) for cell in row.tolist()])
             
-            period_match = re.search(r'(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2},\s+(\d{4})\s+to\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2},\s+(\d{4})', row_text, re.IGNORECASE)
+            period_match = re.search(statement_period_pattern, row_text, re.IGNORECASE)
             if period_match and 'STATEMENT PERIOD' in row_text.upper():
-                statement_start_year = period_match.group(2)
-                statement_end_year = period_match.group(4)
+                statement_start_year = period_match.group(3)
+                statement_end_year = period_match.group(6)
                 break
             elif period_match:
-                statement_start_year = period_match.group(2)
-                statement_end_year = period_match.group(4)
+                statement_start_year = period_match.group(3)
+                statement_end_year = period_match.group(6)
                 break
         if statement_start_year:
             break
+
+    # Fallback: parse statement period from full page text (handles no-space OCR like NEWBALANCE/STATEMENTPERIOD).
+    if not statement_start_year:
+        try:
+            with pdfplumber.open(pdf_path) as pdf:
+                page1_text = pdf.pages[0].extract_text() or ""
+            period_match = re.search(statement_period_pattern, page1_text, re.IGNORECASE)
+            if period_match:
+                statement_start_year = period_match.group(3)
+                statement_end_year = period_match.group(6)
+        except Exception:
+            pass
     
     if not statement_start_year:
         for table_idx, table in enumerate(tables_stream):
             df = table.df.fillna('')
-            for idx in range(min(20, len(df))):
+            for idx in range(min(header_scan_limit, len(df))):
                 row_text = ' '.join([str(cell) for cell in df.iloc[idx].tolist()])
                 year_match = re.search(r'\b(202[0-9]|203[0-9])\b', row_text)
                 if year_match:
@@ -70,9 +87,10 @@ def extract_td_visa_statement(pdf_path: str):
             text += pdf.pages[page_num].extract_text() or ""
     
     opening_patterns = [
-        r'PREVIOUS\s+STATEMENT\s+BALANCE[:\s]+\$?([\d,]+\.?\d{0,2})',
-        r'Previous\s+Statement\s+Balance[:\s]+\$?([\d,]+\.?\d{0,2})',
-        r'Previous\s+Balance[:\s]+\$?([\d,]+\.?\d{0,2})',
+        r'PREVIOUS\s*STATEMENT\s*BALANCE[:\s\$]*([\d,]+\.?\d{0,2})',
+        r'Previous\s*Statement\s*Balance[:\s\$]*([\d,]+\.?\d{0,2})',
+        r'Previous\s*Balance[:\s\$]*([\d,]+\.?\d{0,2})',
+        r'PREVIOUSSTATEMENTBALANCE[:\s\$]*([\d,]+\.?\d{0,2})',
     ]
     
     for table_idx, table in enumerate(tables_stream):
@@ -97,9 +115,11 @@ def extract_td_visa_statement(pdf_path: str):
                 break
     
     closing_patterns = [
-        r'TOTAL\s+NEW\s+BALANCE[:\s]+\$?([\d,]+\.?\d{0,2})',
-        r'NEW\s+BALANCE[:\s]+\$?([\d,]+\.?\d{0,2})',
-        r'New\s+Balance[:\s]+\$?([\d,]+\.?\d{0,2})',
+        r'TOTAL\s*NEW\s*BALANCE[:\s\$]*([\d,]+\.?\d{0,2})',
+        r'NEW\s*BALANCE[:\s\$]*([\d,]+\.?\d{0,2})',
+        r'New\s*Balance[:\s\$]*([\d,]+\.?\d{0,2})',
+        r'TOTALNEWBALANCE[:\s\$]*([\d,]+\.?\d{0,2})',
+        r'NEWBALANCE[:\s\$]*([\d,]+\.?\d{0,2})',
     ]
     
     tables_stream_balances = camelot.read_pdf(pdf_path, pages="all", flavor="stream")
@@ -132,23 +152,24 @@ def extract_td_visa_statement(pdf_path: str):
     }
     
     tables_stream_all = camelot.read_pdf(pdf_path, pages="all", flavor="stream")
-    
-    for table_idx, table in enumerate(tables_stream_all):
-        df = table.df.fillna('')
-        
+    seen_table_transaction_fingerprints = set()
+
+    def detect_header_info(df_local):
+        """Return (header_found, header_idx, date_col, desc_col, amount_col, is_combined_format)."""
         header_found = False
+        header_idx = None
         date_col = None
         desc_col = None
         amount_col = None
-        
-        for idx in range(min(20, len(df))):
-            row = df.iloc[idx]
+        is_combined_format = False
+
+        for i in range(min(header_scan_limit, len(df_local))):
+            row = df_local.iloc[i]
             row_text = ' '.join([str(cell).upper() for cell in row.tolist()])
-            
             if 'DATE' in row_text and ('DESCRIPTION' in row_text or 'MERCHANT' in row_text or 'DETAILS' in row_text or 'ACTIVITY' in row_text) and 'AMOUNT' in row_text:
                 header_found = True
-                
-                is_combined_format = False
+                header_idx = i
+
                 for col_idx, cell in enumerate(row):
                     cell_str = str(cell)
                     if '\n' in cell_str and 'DATE' in cell_str.upper() and ('DESCRIPTION' in cell_str.upper() or 'ACTIVITY' in cell_str.upper()):
@@ -156,7 +177,7 @@ def extract_td_visa_statement(pdf_path: str):
                         date_col = col_idx
                         desc_col = col_idx
                         break
-                
+
                 if not is_combined_format:
                     for col_idx, cell in enumerate(row):
                         cell_upper = str(cell).upper()
@@ -166,7 +187,7 @@ def extract_td_visa_statement(pdf_path: str):
                             desc_col = col_idx
                         if 'AMOUNT' in cell_upper and amount_col is None:
                             amount_col = col_idx
-                
+
                 if amount_col is None:
                     for col_idx, cell in enumerate(row):
                         cell_upper = str(cell).upper()
@@ -174,10 +195,27 @@ def extract_td_visa_statement(pdf_path: str):
                             amount_col = col_idx
                             break
                 break
+
+        return header_found, header_idx, date_col, desc_col, amount_col, is_combined_format
+
+    # If a page has a clean non-combined transaction table, prefer that and skip
+    # combined header tables on the same page (prevents double counting in some statements).
+    pages_with_non_combined_tx = set()
+    for table in tables_stream_all:
+        df = table.df.fillna('')
+        header_found, _, date_col, desc_col, amount_col, is_combined = detect_header_info(df)
+        if header_found and date_col is not None and desc_col is not None and amount_col is not None and not is_combined:
+            pages_with_non_combined_tx.add(int(table.page))
+    
+    for table_idx, table in enumerate(tables_stream_all):
+        df = table.df.fillna('')
+        header_found, idx, date_col, desc_col, amount_col, is_combined_format = detect_header_info(df)
         
         if header_found and date_col is not None and desc_col is not None and amount_col is not None:
+            if is_combined_format and int(table.page) in pages_with_non_combined_tx:
+                continue
             start_row = idx + 1
-            is_combined_format = (date_col == desc_col)
+            table_transactions = []
             
             for row_idx in range(start_row, len(df)):
                 row = df.iloc[row_idx]
@@ -245,11 +283,30 @@ def extract_td_visa_statement(pdf_path: str):
                 except:
                     continue
                 
-                transactions.append({
+                table_transactions.append({
                     'Date': date_str_formatted,
                     'Description': desc_str,
                     'Amount': amount
                 })
+            
+            # Camelot can split/duplicate the same transaction table multiple times on a page.
+            # Keep only one copy per page + extracted transaction sequence.
+            if table_transactions:
+                table_fp = (
+                    int(table.page),
+                    tuple(
+                        (
+                            tx['Date'],
+                            tx['Description'],
+                            round(float(tx['Amount']), 2),
+                        )
+                        for tx in table_transactions
+                    ),
+                )
+                if table_fp in seen_table_transaction_fingerprints:
+                    continue
+                seen_table_transaction_fingerprints.add(table_fp)
+                transactions.extend(table_transactions)
     
     # Create DataFrame
     if transactions:
@@ -275,12 +332,12 @@ class TDVisaExtractor(BankExtractorInterface):
     def detect_bank(self, pdf_path: str) -> bool:
         """Check if PDF is a TD Visa statement"""
         try:
-            # Strong filename hints for TD Visa business statements.
-            # This helps when PDF text extraction on page 1 drops key tokens.
+            # Strong path/filename hints help when page-1 OCR/text drops spaces.
             file_name = str(pdf_path).lower().replace(' ', '')
             file_is_td_visa = (
                 ('td' in file_name and 'visa' in file_name)
-                or 'td_aeroplan_visa_business' in file_name
+                or 'td_aeroplan_visa' in file_name
+                or 'tdaeroplanvisa' in file_name
             )
 
             import pdfplumber
@@ -296,7 +353,9 @@ class TDVisaExtractor(BankExtractorInterface):
                     'toronto-dominion' in text_lower or 
                     'td canada trust' in text_lower or
                     'tdbusiness' in text_no_spaces or
-                    'tdvisa' in text_no_spaces
+                    'tdvisa' in text_no_spaces or
+                    'tdaeroplan' in text_no_spaces or
+                    'td®' in text_lower
                 )
                 
                 has_visa = 'visa' in text_lower
@@ -323,10 +382,8 @@ class TDVisaExtractor(BankExtractorInterface):
                     'deposit/credit' in text_lower
                 ) and is_bank_account
                 
-                # Primary detection from content.
                 content_is_td_visa = has_td and has_visa and has_visa_statement and not is_bank_statement
-
-                # Fallback: if filename clearly indicates TD Visa and page isn't a TD bank statement.
+                # Fallback for known TD Visa folders/filenames where text extraction is noisy.
                 return content_is_td_visa or (file_is_td_visa and not is_bank_statement)
         except:
             return False
