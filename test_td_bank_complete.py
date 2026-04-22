@@ -10,6 +10,21 @@ import re
 from datetime import datetime
 from pathlib import Path
 
+def _parse_td_balance(value):
+    """Parse TD balance strings, including overdraft suffix like '23,122.61OD'."""
+    if value is None:
+        return None
+    s = str(value).strip().upper().replace("$", "").replace(",", "").replace(" ", "")
+    if not s:
+        return None
+    is_od = "OD" in s
+    s = s.replace("OD", "")
+    m = re.search(r"-?\d+(?:\.\d+)?", s)
+    if not m:
+        return None
+    amt = float(m.group(0))
+    return -abs(amt) if is_od else amt
+
 def extract_td_bank_statement(pdf_path):
     """Extract transactions from TD Bank statement"""
     print(f"\n{'='*70}")
@@ -148,8 +163,13 @@ def extract_td_bank_statement(pdf_path):
                         if balance_str:
                             balance_str = balance_str.replace(',', '').replace('$', '').strip()
                             try:
-                                opening_balance = float(balance_str)
-                                print(f"    Opening Balance: ${opening_balance:,.2f}")
+                                # Keep the first statement-level opening balance only.
+                                # Later BALANCE FORWARD rows (continuation pages/tables) should not overwrite it.
+                                if opening_balance is None:
+                                    parsed = _parse_td_balance(balance_str)
+                                    if parsed is not None:
+                                        opening_balance = parsed
+                                    print(f"    Opening Balance: ${opening_balance:,.2f}")
                             except:
                                 pass
                         continue
@@ -221,9 +241,10 @@ def extract_td_bank_statement(pdf_path):
                     if balance_idx is not None and balance_idx < len(row) and row[balance_idx]:
                         balance_str = str(row[balance_idx]).strip().replace(',', '').replace('$', '')
                         try:
-                            balance = float(balance_str)
-                            # Update closing balance
-                            if balance is not None:
+                            parsed = _parse_td_balance(balance_str)
+                            if parsed is not None:
+                                balance = parsed
+                                # Update closing balance
                                 closing_balance = balance
                         except:
                             pass
@@ -837,6 +858,11 @@ def extract_td_bank_statement_camelot(pdf_path):
             
             print(f"  Table {table_idx + 1} (page {table.page}): Using row {header_row} as start")
             print(f"    Columns: DESC={desc_idx}, DEBIT={debit_idx}, CREDIT={credit_idx}, DATE={date_idx}, BALANCE={balance_idx}")
+
+            # Skip malformed/noise tables (e.g., cheque image pages) before row access.
+            if desc_idx is None or date_idx is None:
+                print("    Skipping table: missing required description/date columns")
+                continue
             
             # First, extract opening balance from BALANCE FORWARD row if it exists
             # For first table, this is the statement opening balance
@@ -894,7 +920,10 @@ def extract_td_bank_statement_camelot(pdf_path):
                     if balance_str:
                         balance_str = balance_str.replace(',', '').replace('$', '').strip()
                         try:
-                            bf_balance = float(balance_str)
+                            parsed = _parse_td_balance(balance_str)
+                            if parsed is None:
+                                raise ValueError("balance parse returned None")
+                            bf_balance = parsed
                             # For first table (page 1), this is the opening balance
                             # For subsequent tables (page 2+), this is the continuation balance - don't overwrite
                             if table_idx == 0 or opening_balance is None:
@@ -943,7 +972,10 @@ def extract_td_bank_statement_camelot(pdf_path):
                         if balance_str:
                             balance_str = balance_str.replace(',', '').replace('$', '').strip()
                             try:
-                                bf_balance = float(balance_str)
+                                parsed = _parse_td_balance(balance_str)
+                                if parsed is None:
+                                    raise ValueError("balance parse returned None")
+                                bf_balance = parsed
                                 if table_idx == 0 or opening_balance is None:
                                     opening_balance = bf_balance
                                     print(f"    Opening Balance from BALANCE FORWARD (row {header_row + 1}): ${opening_balance:,.2f}")
@@ -1125,8 +1157,10 @@ def extract_td_bank_statement_camelot(pdf_path):
                     if balance_str:
                         balance_str = balance_str.replace(',', '').replace('$', '').strip()
                         try:
-                            opening_balance = float(balance_str)
-                            print(f"    Opening Balance: ${opening_balance:,.2f}")
+                            parsed = _parse_td_balance(balance_str)
+                            if parsed is not None:
+                                opening_balance = parsed
+                                print(f"    Opening Balance: ${opening_balance:,.2f}")
                         except Exception as e:
                             print(f"    Warning: Could not parse balance '{balance_str}': {e}")
                     else:
@@ -1453,7 +1487,10 @@ def extract_td_bank_statement_camelot(pdf_path):
                     
                     if balance_str and balance_str != '' and balance_str != 'nan':  # Only if not empty
                         try:
-                            balance = float(balance_str)
+                            parsed = _parse_td_balance(balance_str)
+                            if parsed is None:
+                                raise ValueError("balance parse returned None")
+                            balance = parsed
                             # Update closing balance - the last transaction with a balance is the closing balance
                             # But don't use BALANCE FORWARD row's balance as closing (it's the opening/continuation balance)
                             # Also don't use summary row balances

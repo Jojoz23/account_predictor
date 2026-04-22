@@ -275,6 +275,14 @@ class TDVisaExtractor(BankExtractorInterface):
     def detect_bank(self, pdf_path: str) -> bool:
         """Check if PDF is a TD Visa statement"""
         try:
+            # Strong filename hints for TD Visa business statements.
+            # This helps when PDF text extraction on page 1 drops key tokens.
+            file_name = str(pdf_path).lower().replace(' ', '')
+            file_is_td_visa = (
+                ('td' in file_name and 'visa' in file_name)
+                or 'td_aeroplan_visa_business' in file_name
+            )
+
             import pdfplumber
             with pdfplumber.open(pdf_path) as pdf:
                 text = pdf.pages[0].extract_text() if pdf.pages else ""
@@ -315,8 +323,11 @@ class TDVisaExtractor(BankExtractorInterface):
                     'deposit/credit' in text_lower
                 ) and is_bank_account
                 
-                # Only return True if it's actually a Visa statement, not a bank statement
-                return has_td and has_visa and has_visa_statement and not is_bank_statement
+                # Primary detection from content.
+                content_is_td_visa = has_td and has_visa and has_visa_statement and not is_bank_statement
+
+                # Fallback: if filename clearly indicates TD Visa and page isn't a TD bank statement.
+                return content_is_td_visa or (file_is_td_visa and not is_bank_statement)
         except:
             return False
     

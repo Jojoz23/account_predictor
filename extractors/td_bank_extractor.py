@@ -12,11 +12,11 @@ class TDBankExtractor(BankExtractorInterface):
     def __init__(self):
         # Import TD bank extraction functions
         try:
-            # Use the main TD extractor, which now includes a Camelot
-            # summary-table fallback for statements that only show
-            # compact fee summaries (e.g. TD Bank 0124).
-            from test_td_bank_complete import extract_td_bank_statement
-            self.extract_func = extract_td_bank_statement
+            # Use the Camelot-first extractor for TD bank statements.
+            # This handles table-heavy TD layouts more reliably than the
+            # basic pdfplumber table parser.
+            from test_td_bank_complete import extract_td_bank_statement_camelot
+            self.extract_func = extract_td_bank_statement_camelot
         except ImportError as e:
             raise ImportError(f"Could not import TD bank extraction functions: {e}")
     

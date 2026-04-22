@@ -176,6 +176,7 @@ from extractors import (
     NBCompanyCCExtractor,
     BMOBankExtractor,
     AMEXExtractor,
+    MeridianBankExtractor,
     GenericExtractor,
 )
 
@@ -196,6 +197,7 @@ __all__ = [
     'NBBankExtractor',
     'NBCompanyCCExtractor',
     'AMEXExtractor',
+    'MeridianBankExtractor',
     'GenericExtractor',
     'BankExtractorOrchestrator',
     'extract_bank_statement',
@@ -239,6 +241,7 @@ class BankExtractorOrchestrator:
             AMEXExtractor(),          # AMEX (Platinum Card / Amex Bank of Canada)
             RBCChequingExtractor(), # RBC Chequing (before other RBC products)
             TangerineExtractor(),   # Tangerine Bank (before Scotiabank to avoid false matches)
+            MeridianBankExtractor(), # Meridian Bank
             TDBankExtractor(),
             BMOBankExtractor(),     # BMO Bank
             ScotiabankExtractor(),
@@ -280,6 +283,8 @@ class BankExtractorOrchestrator:
             return ScotiabankExtractor()
         elif 'tangerine' in bank_lower:
             return TangerineExtractor()
+        elif 'meridian' in bank_lower:
+            return MeridianBankExtractor()
         elif 'cibc' in bank_lower:
             return CIBCBankExtractor()
         elif ('nb' in bank_lower or 'national bank' in bank_lower) and ('company credit card' in bank_lower or 'company cc' in bank_lower):
@@ -368,6 +373,7 @@ from extractors import (
     extract_scotia_visa_statement,
     ScotiabankExtractor,
     TangerineExtractor,
+    MeridianBankExtractor,
     GenericExtractor,
 )
 
@@ -383,6 +389,7 @@ __all__ = [
     'extract_scotia_visa_statement',
     'ScotiabankExtractor',
     'TangerineExtractor',
+    'MeridianBankExtractor',
     'GenericExtractor',
     'BankExtractorOrchestrator',
     'extract_bank_statement',
