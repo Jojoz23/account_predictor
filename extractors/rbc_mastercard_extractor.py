@@ -17,17 +17,27 @@ from standardized_bank_extractors import BankExtractorInterface, ExtractionResul
 
 
 class RBCMastercardExtractor(BankExtractorInterface):
-    """Extractor for RBC Mastercard statements"""
+    """Extractor for RBC credit card statements (Mastercard/Visa)"""
+
+    @staticmethod
+    def _detect_rbc_card_brand(text: str) -> str:
+        """Return RBC card brand from statement text."""
+        text_upper = text.upper()
+        if 'VISA' in text_upper:
+            return 'Visa'
+        if 'MASTERCARD' in text_upper:
+            return 'Mastercard'
+        return 'Card'
     
     def detect_bank(self, pdf_path: str) -> bool:
         """
-        Detect if this PDF is an RBC Mastercard statement
+        Detect if this PDF is an RBC credit card statement
         
         Args:
             pdf_path: Path to the PDF file
             
         Returns:
-            True if this appears to be an RBC Mastercard statement
+            True if this appears to be an RBC Visa/Mastercard statement
         """
         try:
             import pdfplumber
@@ -38,23 +48,23 @@ class RBCMastercardExtractor(BankExtractorInterface):
                     if page_text:
                         text += page_text + "\n"
                 
-                # Look for RBC Mastercard indicators
+                # Look for RBC credit-card indicators
                 text_upper = text.upper()
                 has_rbc = 'RBC' in text_upper or 'ROYAL BANK' in text_upper
-                has_mastercard = 'MASTERCARD' in text_upper
+                has_card_brand = 'MASTERCARD' in text_upper or 'VISA' in text_upper
                 has_card_number = '****' in text or '**' in text
                 
                 # Make sure it's not a chequing account
                 is_not_chequing = 'CHEQUING' not in text_upper and 'BUSINESS ACCOUNT' not in text_upper
                 
-                # RBC Mastercard statements typically have all of these
-                return has_rbc and has_mastercard and has_card_number and is_not_chequing
+                # RBC credit-card statements typically have all of these
+                return has_rbc and has_card_brand and has_card_number and is_not_chequing
         except:
             return False
     
     def extract(self, pdf_path: str) -> ExtractionResult:
         """
-        Extract transactions from RBC Mastercard statement
+        Extract transactions from RBC credit-card statement
         
         Args:
             pdf_path: Path to the PDF file
@@ -63,12 +73,18 @@ class RBCMastercardExtractor(BankExtractorInterface):
             ExtractionResult with transactions and metadata
         """
         try:
+            import pdfplumber
+            with pdfplumber.open(pdf_path) as pdf:
+                first_page = pdf.pages[0].extract_text() if pdf.pages else ""
+            brand = self._detect_rbc_card_brand(first_page or "")
+            bank_label = f"RBC {brand}".strip()
+
             df, opening_balance, closing_balance, statement_year = extract_rbc_mastercard_statement(pdf_path)
             
             if df is None or len(df) == 0:
                 return ExtractionResult(
                     df=pd.DataFrame(),
-                    metadata={'bank': 'RBC Mastercard'},
+                    metadata={'bank': bank_label},
                     success=False,
                     error='No transactions extracted'
                 )
@@ -78,7 +94,7 @@ class RBCMastercardExtractor(BankExtractorInterface):
             
             # Build metadata
             metadata = {
-                'bank': 'RBC Mastercard',
+                'bank': bank_label,
                 'is_credit_card': True,
                 'opening_balance': opening_balance,
                 'closing_balance': closing_balance,
@@ -94,7 +110,7 @@ class RBCMastercardExtractor(BankExtractorInterface):
         except Exception as e:
             return ExtractionResult(
                 df=pd.DataFrame(),
-                metadata={'bank': 'RBC Mastercard'},
+                metadata={'bank': 'RBC Card'},
                 success=False,
                 error=str(e)
             )

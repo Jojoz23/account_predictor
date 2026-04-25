@@ -291,7 +291,7 @@ class BankExtractorOrchestrator:
             return NBCompanyCCExtractor()
         elif 'nb' in bank_lower or 'national bank' in bank_lower:
             return NBBankExtractor()
-        elif ('rbc' in bank_lower or 'royal bank' in bank_lower) and ('mastercard' in bank_lower):
+        elif ('rbc' in bank_lower or 'royal bank' in bank_lower) and ('mastercard' in bank_lower or 'visa' in bank_lower or 'credit' in bank_lower):
             from extractors.rbc_mastercard_extractor import RBCMastercardExtractor
             return RBCMastercardExtractor()
         elif ('rbc' in bank_lower or 'royal bank' in bank_lower) and ('chequing' in bank_lower or 'business account' in bank_lower):

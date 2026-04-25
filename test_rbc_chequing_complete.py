@@ -11,6 +11,133 @@ import re
 from datetime import datetime
 from pathlib import Path
 
+def _parse_rbc_from_ocr_text(*args, **kwargs):
+    """Optional OCR fallback is currently disabled for this extractor."""
+    return []
+
+
+def _extract_statement_totals(full_text):
+    """Extract statement-level total deposits/withdrawals from RBC summary block."""
+    dep = None
+    wd = None
+    dep_match = re.search(
+        r'totaldepositsintoyouraccount\s*\+?\s*([\d,]+\.\d{2})',
+        ''.join(full_text.lower().split())
+    )
+    wd_match = re.search(
+        r'totalwithdrawalsfromyouraccount\s*-?\s*([\d,]+\.\d{2})',
+        ''.join(full_text.lower().split())
+    )
+    if dep_match:
+        dep = float(dep_match.group(1).replace(',', ''))
+    if wd_match:
+        wd = float(wd_match.group(1).replace(',', ''))
+    return dep, wd
+
+
+def _norm_key_text(s):
+    return re.sub(r'[^a-z0-9]+', '', str(s).lower())
+
+
+def _extract_continued_section_lines(full_text, statement_year, default_date=None):
+    """
+    Parse RBC 'Details of your account activity - continued' blocks.
+    Returns compact candidates with date (optional), first amount, optional balance.
+    """
+    month_map = {
+        'jan': 1, 'feb': 2, 'mar': 3, 'apr': 4, 'may': 5, 'jun': 6,
+        'jul': 7, 'aug': 8, 'sep': 9, 'oct': 10, 'nov': 11, 'dec': 12
+    }
+    candidates = []
+    current_date = default_date
+    lines = [ln.strip() for ln in full_text.split('\n') if ln and ln.strip()]
+    in_continued = False
+
+    for line in lines:
+        line_l = line.lower()
+        if 'detailsofyouraccountactivity-continued' in line_l:
+            in_continued = True
+            continue
+        if not in_continued:
+            continue
+        if any(x in line_l for x in ['closingbalance', 'importantinformationaboutyouraccount']):
+            break
+        if any(x in line_l for x in ['date description', 'withdrawals($)', 'deposits($)', 'balance($)']):
+            continue
+
+        # Date may be compact (e.g., 30Dec) or spaced (30 Dec)
+        dm = re.match(r'^(\d{1,2})\s*([A-Za-z]{3})\s*(.*)$', line)
+        content = line
+        if dm:
+            day = int(dm.group(1))
+            mon = month_map.get(dm.group(2).lower())
+            rest = dm.group(3).strip()
+            if mon and rest:
+                try:
+                    current_date = datetime(statement_year, mon, day).strftime('%Y-%m-%d')
+                    content = rest
+                except Exception:
+                    pass
+
+        amts = re.findall(r'(?<![A-Za-z0-9])(-?[\d,]+\.\d{2})(?![A-Za-z0-9])', content)
+        if not amts or current_date is None:
+            continue
+
+        txn_amount = abs(float(amts[0].replace(',', '')))
+        bal_amount = abs(float(amts[1].replace(',', ''))) if len(amts) >= 2 else None
+        desc = re.sub(r'(?<![A-Za-z0-9])[\d,]+\.\d{2}(?![A-Za-z0-9])', '', content)
+        desc = re.sub(r'\s+', ' ', desc).strip()
+        if not desc:
+            continue
+
+        candidates.append({
+            'Date': current_date,
+            'Description': desc,
+            'Amount': txn_amount,
+            'BalanceHint': bal_amount,
+        })
+
+    return candidates
+
+
+def _classify_amount_side(description, amount, dep_deficit, wd_deficit):
+    """Choose deposit vs withdrawal side for a supplemental candidate."""
+    d = description.lower()
+    dep_kw = any(k in d for k in ['deposit', 'rebate', 'refund', 'payment canada', 'gov'])
+    wd_kw = any(k in d for k in ['transfer', 'purchase', 'sent', 'fee', 'withdrawal', 'interac'])
+
+    if dep_kw and not wd_kw:
+        return 'deposit'
+    if wd_kw and not dep_kw:
+        return 'withdrawal'
+
+    # Fallback: assign to the side with larger remaining deficit.
+    if wd_deficit > dep_deficit:
+        return 'withdrawal'
+    return 'deposit'
+
+
+def _compute_running_balance(df, opening_balance):
+    """Compute running balance using same rules as final output."""
+    if opening_balance is None or df is None or df.empty:
+        return None
+    rb = opening_balance
+    has_balance = 'Balance' in df.columns and pd.to_numeric(df['Balance'], errors='coerce').notna().any()
+    vals = []
+    for _, row in df.iterrows():
+        bal = pd.to_numeric(pd.Series([row.get('Balance')]), errors='coerce').iloc[0] if has_balance else None
+        if pd.notna(bal):
+            rb = float(bal)
+        else:
+            wd = pd.to_numeric(pd.Series([row.get('Withdrawals')]), errors='coerce').iloc[0]
+            dep = pd.to_numeric(pd.Series([row.get('Deposits')]), errors='coerce').iloc[0]
+            if pd.notna(wd):
+                rb -= float(wd)
+            if pd.notna(dep):
+                rb += float(dep)
+        vals.append(rb)
+    return vals
+
 def extract_rbc_chequing_statement(pdf_path):
     """
     Extract transactions from RBC Chequing statement
@@ -144,11 +271,32 @@ def extract_rbc_chequing_statement(pdf_path):
                 df.columns = range(len(df.columns))
             
             # Check if this table has transaction headers
-            if len(df.columns) >= 4:
-                # Check for transaction-related headers in first few rows
-                for row_idx in range(min(5, len(df))):
+            if len(df.columns) >= 3:
+                # Check for transaction-related headers in first few rows.
+                # RBC PDFs can collapse spacing (e.g., "Detailsofyouraccountactivity")
+                # and can use variations like "D ate", "Withdrawals($)", "Deposits($)".
+                for row_idx in range(min(12, len(df))):
                     header_text = ' '.join(df.iloc[row_idx].astype(str)).lower()
-                    if 'date' in header_text and ('description' in header_text or 'debits' in header_text or 'credits' in header_text or 'continued' in header_text):
+                    header_text_nospace = ''.join(header_text.split())
+
+                    has_date = (
+                        'date' in header_text
+                        or 'd ate' in header_text
+                        or 'date' in header_text_nospace
+                    )
+                    has_desc = (
+                        'description' in header_text
+                        or 'description' in header_text_nospace
+                    )
+                    has_amount_side = any(
+                        kw in header_text or kw in header_text_nospace
+                        for kw in [
+                            'debits', 'debit', 'withdrawals', 'withdrawal',
+                            'credits', 'credit', 'deposits', 'deposit', 'balance'
+                        ]
+                    )
+
+                    if has_date and has_desc and has_amount_side:
                         transaction_tables.append((df, row_idx))
                         break
         
@@ -179,11 +327,24 @@ def extract_rbc_chequing_statement(pdf_path):
                 cell_text = str(header_row.iloc[col_idx]).lower().strip()
                 if 'date' in cell_text and detected['date'] is None:
                     detected['date'] = col_idx
+                    # RBC often uses a combined "Date Description" header.
+                    if 'description' in cell_text and detected['desc'] is None:
+                        detected['desc'] = col_idx
                 elif 'description' in cell_text and detected['desc'] is None:
                     detected['desc'] = col_idx
-                elif ('cheques' in cell_text or 'debits' in cell_text) and '$' in cell_text and detected['debit'] is None:
+                elif (
+                    'cheques' in cell_text or
+                    'debits' in cell_text or
+                    'withdrawals' in cell_text or
+                    'withdrawal' in cell_text
+                ) and '$' in cell_text and detected['debit'] is None:
                     detected['debit'] = col_idx
-                elif ('deposits' in cell_text or 'credits' in cell_text) and '$' in cell_text and detected['credit'] is None:
+                elif (
+                    'deposits' in cell_text or
+                    'deposit' in cell_text or
+                    'credits' in cell_text or
+                    'credit' in cell_text
+                ) and '$' in cell_text and detected['credit'] is None:
                     detected['credit'] = col_idx
                 elif 'balance' in cell_text and '$' in cell_text and detected['balance'] is None:
                     detected['balance'] = col_idx
@@ -231,6 +392,7 @@ def extract_rbc_chequing_statement(pdf_path):
             table_debit_col = detected['debit'] if detected['debit'] is not None else debit_col
             table_credit_col = detected['credit'] if detected['credit'] is not None else credit_col
             table_balance_col = detected['balance'] if detected['balance'] is not None else balance_col
+            date_and_desc_same_col = (table_date_col == table_desc_col)
             for i in range(header_row_idx + 1, len(transaction_table)):
                 row = transaction_table.iloc[i]
                 
@@ -257,6 +419,20 @@ def extract_rbc_chequing_statement(pdf_path):
                 
                 # Check if this row has a date (format: "03 Feb" or "03Feb" or "22 Jan")
                 date_match = re.match(r'^(\d{1,2})\s*(\w{3})', date_str)
+                if not date_match:
+                    # Some RBC tables can shift date+description into a different column.
+                    # Scan non-amount columns as fallback.
+                    scan_cols = []
+                    for cidx in range(len(row)):
+                        if cidx in [table_debit_col, table_credit_col, table_balance_col]:
+                            continue
+                        cell = str(row.iloc[cidx]).strip()
+                        if cell and cell.lower() not in ['', 'nan', 'none']:
+                            scan_cols.append(cell)
+                    for cell_text in scan_cols:
+                        date_match = re.match(r'^(\d{1,2})\s*(\w{3})', cell_text)
+                        if date_match:
+                            break
                 if date_match:
                     day = int(date_match.group(1))
                     month_abbr = date_match.group(2).capitalize()
@@ -298,6 +474,9 @@ def extract_rbc_chequing_statement(pdf_path):
                 desc = str(row.iloc[table_desc_col]) if table_desc_col < len(row) else ''
                 # Only strip leading/trailing whitespace, preserve internal formatting
                 desc = desc.strip()
+                if date_and_desc_same_col and desc:
+                    # If date and description share one column, remove leading date token.
+                    desc = re.sub(r'^\d{1,2}\s*\w{3}\s*', '', desc, count=1).strip()
                 # Replace newlines with single space for consistency, but preserve other formatting
                 if '\n' in desc:
                     desc = ' '.join(desc.split())  # Normalize whitespace but keep as single line
@@ -335,24 +514,24 @@ def extract_rbc_chequing_statement(pdf_path):
                 
                 # Remove commas and dollar signs
                 if debit_str and debit_str.lower() not in ['', 'nan', 'none']:
-                    debit_match = re.search(r'([\d,]+\.?\d*)', debit_str)
+                    debit_match = re.search(r'(?:^|\s)(-?\$?[\d,]+\.\d{2})(?:\s|$)', debit_str)
                     if debit_match:
                         try:
-                            debit = float(debit_match.group(1).replace(',', ''))
+                            debit = float(debit_match.group(1).replace('$', '').replace(',', ''))
                         except:
                             pass
                 
                 if credit_str and credit_str.lower() not in ['', 'nan', 'none']:
-                    credit_match = re.search(r'([\d,]+\.?\d*)', credit_str)
+                    credit_match = re.search(r'(?:^|\s)(-?\$?[\d,]+\.\d{2})(?:\s|$)', credit_str)
                     if credit_match:
                         try:
-                            credit = float(credit_match.group(1).replace(',', ''))
+                            credit = float(credit_match.group(1).replace('$', '').replace(',', ''))
                         except:
                             pass
                 
                 if balance_str and balance_str.lower() not in ['', 'nan', 'none']:
                     # Handle negative balances (e.g., "-267.90" or "-$1,345.99")
-                    balance_match = re.search(r'(-?\$?)([\d,]+\.?\d*)', balance_str)
+                    balance_match = re.search(r'(-?\$?)([\d,]+\.\d{2})', balance_str)
                     if balance_match:
                         try:
                             sign = balance_match.group(1)  # '-' or '$' or '-$' or empty
@@ -702,7 +881,7 @@ def extract_rbc_chequing_statement(pdf_path):
                 # Collect all non-amount, non-date columns
                 for col_idx in range(len(row)):
                     # Skip date column
-                    if col_idx == table_date_col:
+                    if col_idx == table_date_col and not date_and_desc_same_col:
                         continue
                     
                     # Skip amount columns
@@ -712,6 +891,10 @@ def extract_rbc_chequing_statement(pdf_path):
                     col_val = str(row.iloc[col_idx]).strip()
                     if not col_val or col_val.lower() in ['', 'nan', 'none']:
                         continue
+                    if date_and_desc_same_col and col_idx == table_date_col:
+                        col_val = re.sub(r'^\d{1,2}\s*\w{3}\s*', '', col_val, count=1).strip()
+                        if not col_val:
+                            continue
                     
                     # Additional check: if this looks like an amount (has decimal pattern), skip it
                     if re.match(r'^[\d,]+\.\d{2}$', col_val.replace('$', '').replace(',', '').strip()):
@@ -729,7 +912,9 @@ def extract_rbc_chequing_statement(pdf_path):
                         seen.add(part)
                         unique_parts.append(part)
                 
-                full_description = ' '.join(unique_parts) if unique_parts else 'Transaction'
+                full_description = ' '.join(unique_parts) if unique_parts else ''
+                if not full_description:
+                    continue
                 
                 transactions.append({
                     'Date': current_date.strftime('%Y-%m-%d'),
@@ -766,6 +951,94 @@ def extract_rbc_chequing_statement(pdf_path):
             return None, opening_balance, closing_balance, statement_year
     
     df = pd.DataFrame(transactions)
+
+    # Supplemental pass: add continuation lines only if base extraction does
+    # not already tie to closing balance.
+    expected_dep, expected_wd = _extract_statement_totals(full_text)
+    if len(df) > 0 and (expected_dep is not None or expected_wd is not None):
+        base_rb = _compute_running_balance(df, opening_balance)
+        if closing_balance is not None and base_rb is not None and abs(float(base_rb[-1]) - float(closing_balance)) < 0.01:
+            expected_dep = None
+            expected_wd = None
+
+    if len(df) > 0 and (expected_dep is not None or expected_wd is not None):
+        cur_wd = float(pd.to_numeric(df.get('Withdrawals', 0), errors='coerce').fillna(0).sum())
+        cur_dep = float(pd.to_numeric(df.get('Deposits', 0), errors='coerce').fillna(0).sum())
+        wd_deficit = max((expected_wd - cur_wd) if expected_wd is not None else 0.0, 0.0)
+        dep_deficit = max((expected_dep - cur_dep) if expected_dep is not None else 0.0, 0.0)
+
+        if wd_deficit > 0.009 or dep_deficit > 0.009:
+            existing_keys = set()
+            for _, r in df.iterrows():
+                amt = r.get('Withdrawals') if pd.notna(r.get('Withdrawals')) else r.get('Deposits')
+                if pd.notna(amt):
+                    existing_keys.add((str(r.get('Date')), _norm_key_text(r.get('Description')), round(float(amt), 2)))
+
+            default_date = None
+            if 'Date' in df.columns and len(df) > 0:
+                try:
+                    default_date = pd.to_datetime(df['Date'].iloc[-1], errors='coerce')
+                    if pd.notna(default_date):
+                        default_date = default_date.strftime('%Y-%m-%d')
+                    else:
+                        default_date = None
+                except Exception:
+                    default_date = None
+
+            supplements = _extract_continued_section_lines(full_text, statement_year or 2025, default_date=default_date)
+            add_rows = []
+            known_balance = None
+            if 'Running_Balance' in df.columns and df['Running_Balance'].notna().any():
+                known_balance = float(df['Running_Balance'].dropna().iloc[-1])
+            elif 'Balance' in df.columns and df['Balance'].notna().any():
+                known_balance = float(df['Balance'].dropna().iloc[-1])
+
+            for cand in supplements:
+                key = (cand['Date'], _norm_key_text(cand['Description']), round(float(cand['Amount']), 2))
+                if key in existing_keys:
+                    continue
+
+                side = None
+                if known_balance is not None and cand.get('BalanceHint') is not None:
+                    bal_hint = float(cand['BalanceHint'])
+                    delta = bal_hint - known_balance
+                    if abs(delta + cand['Amount']) < 0.02:
+                        side = 'withdrawal'
+                    elif abs(delta - cand['Amount']) < 0.02:
+                        side = 'deposit'
+                    known_balance = bal_hint
+
+                if side is None:
+                    side = _classify_amount_side(cand['Description'], cand['Amount'], dep_deficit, wd_deficit)
+
+                if side == 'withdrawal' and wd_deficit > 0.009:
+                    add_rows.append({
+                        'Date': cand['Date'],
+                        'Description': cand['Description'],
+                        'Withdrawals': cand['Amount'],
+                        'Deposits': None,
+                        'Balance': None,
+                    })
+                    wd_deficit = max(wd_deficit - cand['Amount'], 0.0)
+                    if known_balance is not None:
+                        known_balance -= cand['Amount']
+                elif side == 'deposit' and dep_deficit > 0.009:
+                    add_rows.append({
+                        'Date': cand['Date'],
+                        'Description': cand['Description'],
+                        'Withdrawals': None,
+                        'Deposits': cand['Amount'],
+                        'Balance': None,
+                    })
+                    dep_deficit = max(dep_deficit - cand['Amount'], 0.0)
+                    if known_balance is not None:
+                        known_balance += cand['Amount']
+
+            if add_rows:
+                df = pd.concat([df, pd.DataFrame(add_rows)], ignore_index=True)
+                df['Date'] = pd.to_datetime(df['Date'], errors='coerce')
+                df = df.sort_values('Date').reset_index(drop=True)
+                df['Date'] = df['Date'].dt.strftime('%Y-%m-%d')
     
     # Calculate running balance manually from opening balance, withdrawals, and deposits
     # When Balance column from PDF is available, use it to correct running balance
@@ -792,7 +1065,7 @@ def extract_rbc_chequing_statement(pdf_path):
         df['Running_Balance'] = running_balances
     else:
         df['Running_Balance'] = None
-    
+
     return df, opening_balance, closing_balance, statement_year
 
 if __name__ == "__main__":

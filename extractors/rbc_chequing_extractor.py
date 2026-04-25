@@ -39,26 +39,49 @@ class RBCChequingExtractor(BankExtractorInterface):
                     return False
                 
                 first_page_text_lower = first_page_text.lower()
-                
+                # RBC PDFs can collapse words, e.g. "RoyalBankofCanada".
+                first_page_text_nospace = ''.join(first_page_text_lower.split())
                 # Exclude other banks' statements (e.g. TD statement that mentions "RBC VISA" in a transaction)
                 if 'toronto-dominion' in first_page_text_lower or 'td bank' in first_page_text_lower:
                     return False
                 
                 # Check for RBC indicators
-                has_rbc = 'royal bank' in first_page_text_lower or 'rbc' in first_page_text_lower
-                has_chequing = 'chequing' in first_page_text_lower or 'business account' in first_page_text_lower
-                has_account_activity = 'account activity' in first_page_text_lower
+                has_rbc = (
+                    'royal bank' in first_page_text_lower
+                    or 'rbc' in first_page_text_lower
+                    or 'royalbankofcanada' in first_page_text_nospace
+                )
+                has_chequing = (
+                    'chequing' in first_page_text_lower
+                    or 'business account' in first_page_text_lower
+                    or 'account statement' in first_page_text_lower
+                    or 'rbcadvantagebanking' in first_page_text_nospace
+                )
+                has_account_activity = (
+                    'account activity' in first_page_text_lower
+                    or 'detailsofyouraccountactivity' in first_page_text_nospace
+                )
                 
                 # Check for transaction table headers
                 has_transaction_headers = (
-                    'date' in first_page_text_lower and 
-                    ('description' in first_page_text_lower or 'debits' in first_page_text_lower) and
-                    ('balance' in first_page_text_lower or 'credits' in first_page_text_lower)
+                    ('date' in first_page_text_lower or 'd ate' in first_page_text_lower) and
+                    ('description' in first_page_text_lower) and
+                    (
+                        'debits' in first_page_text_lower
+                        or 'withdrawals' in first_page_text_lower
+                        or 'credits' in first_page_text_lower
+                        or 'deposits' in first_page_text_lower
+                        or 'balance' in first_page_text_lower
+                    )
                 )
                 
                 # RBC Chequing statements typically have all of these
                 # Make sure it's not a credit card statement
-                is_not_credit_card = 'credit card' not in first_page_text_lower and 'mastercard' not in first_page_text_lower
+                is_not_credit_card = (
+                    'credit card' not in first_page_text_lower
+                    and 'mastercard' not in first_page_text_lower
+                    and 'creditcard' not in first_page_text_nospace
+                )
                 
                 return has_rbc and (has_chequing or has_account_activity) and has_transaction_headers and is_not_credit_card
                 
