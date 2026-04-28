@@ -19,6 +19,7 @@ from .bmo_bank_extractor import BMOBankExtractor
 from .bmo_credit_card_extractor import BMOCreditCardExtractor
 from .amex_extractor import AMEXExtractor
 from .meridian_bank_extractor import MeridianBankExtractor
+from .neo_credit_extractor import NeoCreditExtractor
 from .generic_extractor import GenericExtractor
 
 __all__ = [
@@ -39,5 +40,6 @@ __all__ = [
     'BMOCreditCardExtractor',
     'AMEXExtractor',
     'MeridianBankExtractor',
+    'NeoCreditExtractor',
     'GenericExtractor',
 ]

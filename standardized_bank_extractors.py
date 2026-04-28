@@ -177,6 +177,7 @@ from extractors import (
     BMOBankExtractor,
     AMEXExtractor,
     MeridianBankExtractor,
+    NeoCreditExtractor,
     GenericExtractor,
 )
 
@@ -198,6 +199,7 @@ __all__ = [
     'NBCompanyCCExtractor',
     'AMEXExtractor',
     'MeridianBankExtractor',
+    'NeoCreditExtractor',
     'GenericExtractor',
     'BankExtractorOrchestrator',
     'extract_bank_statement',
@@ -231,6 +233,7 @@ class BankExtractorOrchestrator:
         from extractors.rbc_mastercard_extractor import RBCMastercardExtractor
         from extractors.bmo_bank_extractor import BMOBankExtractor
         from extractors.bmo_credit_card_extractor import BMOCreditCardExtractor
+        from extractors.neo_credit_extractor import NeoCreditExtractor
         
         self.extractors = [
             TDVisaExtractor(),      # Check TD Visa before TD Bank
@@ -239,6 +242,7 @@ class BankExtractorOrchestrator:
             RBCMastercardExtractor(), # RBC Mastercard (before RBC Chequing)
             BMOCreditCardExtractor(), # BMO Credit Card (before BMO Bank)
             AMEXExtractor(),          # AMEX (Platinum Card / Amex Bank of Canada)
+            NeoCreditExtractor(),     # Neo Financial Credit Card
             RBCChequingExtractor(), # RBC Chequing (before other RBC products)
             TangerineExtractor(),   # Tangerine Bank (before Scotiabank to avoid false matches)
             MeridianBankExtractor(), # Meridian Bank
@@ -299,6 +303,9 @@ class BankExtractorOrchestrator:
             return RBCChequingExtractor()
         elif 'amex' in bank_lower or 'american express' in bank_lower:
             return AMEXExtractor()
+        elif 'neo' in bank_lower:
+            from extractors.neo_credit_extractor import NeoCreditExtractor
+            return NeoCreditExtractor()
         else:
             return GenericExtractor()
 
