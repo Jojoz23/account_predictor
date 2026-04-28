@@ -88,3 +88,4 @@ config/
 archive/
 docs/cursor_readme_update_and_iff_scripts_cl.md
 
+.venv311/
