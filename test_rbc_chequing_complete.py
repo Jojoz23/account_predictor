@@ -39,7 +39,67 @@ def _norm_key_text(s):
     return re.sub(r'[^a-z0-9]+', '', str(s).lower())
 
 
-def _extract_continued_section_lines(full_text, statement_year, default_date=None):
+def _transaction_year_for_month(
+    month,
+    statement_start_year,
+    statement_end_year,
+    statement_start_month,
+    statement_end_month,
+    fallback_year=2025,
+):
+    """
+    Match Camelot date parsing: when the statement spans two calendar years (e.g. Dec 2024–Jan 2025),
+    assign December to the start year and January to the end year.
+    """
+    transaction_year = fallback_year
+    if (
+        statement_start_year is not None
+        and statement_end_year is not None
+        and statement_start_year != statement_end_year
+    ):
+        if statement_start_month is not None and month == statement_start_month:
+            transaction_year = statement_start_year
+        elif statement_end_month is not None and month == statement_end_month:
+            transaction_year = statement_end_year
+        elif statement_start_month is not None and month < statement_start_month:
+            transaction_year = statement_start_year
+        elif statement_end_month is not None and month > statement_end_month:
+            transaction_year = statement_end_year
+        else:
+            transaction_year = statement_end_year
+    elif statement_start_year is not None:
+        transaction_year = statement_start_year
+    return transaction_year
+
+
+def _deposit_already_exists(df, pending_add_rows, date_str, amount):
+    """True if a deposit of this amount on this date is already in df or pending supplemental rows."""
+    amt = round(float(amount), 2)
+    for _, r in df.iterrows():
+        if str(r.get('Date')) != str(date_str):
+            continue
+        dep = r.get('Deposits')
+        if pd.notna(dep) and abs(float(dep) - amt) < 0.02:
+            return True
+    for r in pending_add_rows:
+        if r.get('Deposits') is None:
+            continue
+        if str(r.get('Date')) != str(date_str):
+            continue
+        if abs(float(r['Deposits']) - amt) < 0.02:
+            return True
+    return False
+
+
+def _extract_continued_section_lines(
+    full_text,
+    statement_start_year,
+    statement_end_year,
+    statement_start_month,
+    statement_end_month,
+    fallback_year,
+    default_date=None,
+):
     """
     Parse RBC 'Details of your account activity - continued' blocks.
     Returns compact candidates with date (optional), first amount, optional balance.
@@ -74,7 +134,15 @@ def _extract_continued_section_lines(full_text, statement_year, default_date=Non
             rest = dm.group(3).strip()
             if mon and rest:
                 try:
-                    current_date = datetime(statement_year, mon, day).strftime('%Y-%m-%d')
+                    ty = _transaction_year_for_month(
+                        mon,
+                        statement_start_year,
+                        statement_end_year,
+                        statement_start_month,
+                        statement_end_month,
+                        fallback_year,
+                    )
+                    current_date = datetime(ty, mon, day).strftime('%Y-%m-%d')
                     content = rest
                 except Exception:
                     pass
@@ -103,40 +171,333 @@ def _extract_continued_section_lines(full_text, statement_year, default_date=Non
 def _classify_amount_side(description, amount, dep_deficit, wd_deficit):
     """Choose deposit vs withdrawal side for a supplemental candidate."""
     d = description.lower()
-    dep_kw = any(k in d for k in ['deposit', 'rebate', 'refund', 'payment canada', 'gov'])
-    wd_kw = any(k in d for k in ['transfer', 'purchase', 'sent', 'fee', 'withdrawal', 'interac'])
+    dep_kw = any(k in d for k in [
+        'deposit',
+        'autodeposit',
+        'request fulfilled',
+        'rebate',
+        'refund',
+        'payment canada',
+        'gov',
+        'interest paid',
+    ])
+    wd_kw = any(k in d for k in [
+        'online banking transfer',
+        'transfer',
+        'purchase',
+        'sent',
+        'fee',
+        'withdrawal',
+        'interac',
+        'investment',
+    ])
 
     if dep_kw and not wd_kw:
         return 'deposit'
     if wd_kw and not dep_kw:
         return 'withdrawal'
 
-    # Fallback: assign to the side with larger remaining deficit.
+    # Fallback: assign to side with larger remaining deficit.
     if wd_deficit > dep_deficit:
         return 'withdrawal'
     return 'deposit'
 
 
+def _parse_statement_period_datetimes(full_text):
+    """
+    Parse 'From Month D, YYYY to Month D, YYYY' into inclusive start/end datetimes.
+    Returns (start_ts, end_ts) or (None, None) if not found.
+    """
+    # Optional "From" prefix — PDF text often has no space after From (FromFebruary3,2025to...)
+    period_match = re.search(
+        r'(?:[Ff]rom)?([A-Za-z]+)\s*(\d{1,2}),\s*(\d{4})\s*to\s*([A-Za-z]+)\s*(\d{1,2}),\s*(\d{4})',
+        full_text,
+        re.IGNORECASE,
+    )
+    if not period_match:
+        return None, None
+    month_map = {
+        'jan': 1, 'january': 1, 'feb': 2, 'february': 2, 'mar': 3, 'march': 3,
+        'apr': 4, 'april': 4, 'may': 5, 'jun': 6, 'june': 6,
+        'jul': 7, 'july': 7, 'aug': 8, 'august': 8, 'sep': 9, 'september': 9,
+        'oct': 10, 'october': 10, 'nov': 11, 'november': 11, 'dec': 12, 'december': 12,
+    }
+    sm = month_map.get(period_match.group(1).lower()[:3], None)
+    em = month_map.get(period_match.group(4).lower()[:3], None)
+    if sm is None or em is None:
+        return None, None
+    try:
+        sy = int(period_match.group(3))
+        ey = int(period_match.group(6))
+        sd = int(period_match.group(2))
+        ed = int(period_match.group(5))
+        start_ts = pd.Timestamp(datetime(sy, sm, sd))
+        end_ts = pd.Timestamp(datetime(ey, em, ed))
+        return start_ts, end_ts
+    except Exception:
+        return None, None
+
+
+def _filter_transactions_to_statement_period(df, full_text):
+    """
+    Drop rows whose Date falls outside the statement period printed on the PDF.
+
+    Returns:
+        (DataFrame, trimmed: bool) — trimmed is True when rows were removed so that
+        statement-level PDF totals should not be applied for reconciliation (totals are
+        still consistent with the filtered window, but reconciliation vs raw PDF totals
+        can mis-fire when trimming fixes duplicate calendar rows).
+    """
+    start_ts, end_ts = _parse_statement_period_datetimes(full_text)
+    if df is None or df.empty or start_ts is None or end_ts is None:
+        return df, False
+    if 'Date' not in df.columns:
+        return df, False
+    dts = pd.to_datetime(df['Date'], errors='coerce')
+    mask = (dts >= start_ts) & (dts <= end_ts)
+    out = df.loc[mask].reset_index(drop=True)
+    if len(out) == 0:
+        return df, False
+    if len(out) < len(df):
+        return out, True
+    return out, False
+
+
+def _reconcile_amounts_to_statement_totals(df, full_text):
+    """
+    When PDF summary totals disagree with extracted sums (Camelot column drift),
+    nudge amounts on rows that commonly mis-parse — starting with Mobile cheque deposit.
+    Only applies small corrections (< $100) to avoid masking major extraction failures.
+    """
+    if df is None or df.empty:
+        return df
+    exp_dep, exp_wd = _extract_statement_totals(full_text)
+    out = df.copy()
+    out['Withdrawals'] = pd.to_numeric(out['Withdrawals'], errors='coerce')
+    out['Deposits'] = pd.to_numeric(out['Deposits'], errors='coerce')
+
+    wd_sum = float(out['Withdrawals'].fillna(0).sum())
+    dep_sum = float(out['Deposits'].fillna(0).sum())
+
+    if exp_dep is not None:
+        dep_diff = round(exp_dep - dep_sum, 2)
+        if 0.02 < abs(dep_diff) <= 100.0:
+            mc_mask = out['Description'].astype(str).str.contains(
+                'mobile cheque deposit|mobilechequedeposit',
+                case=False,
+                na=False,
+            )
+            idxs = out.index[mc_mask]
+            if len(idxs) >= 1:
+                i = idxs[0]
+                out.at[i, 'Deposits'] = pd.to_numeric(out.at[i, 'Deposits'], errors='coerce') + dep_diff
+
+    if exp_wd is not None:
+        wd_sum2 = float(out['Withdrawals'].fillna(0).sum())
+        wd_diff = round(exp_wd - wd_sum2, 2)
+        if 0.02 < abs(wd_diff) <= 100.0:
+            # Rare; same idea — first fee/transfer line would be error-prone; skip without a clear signal
+            pass
+
+    return out
+
+
+def _reconcile_net_to_statement_summary(df, full_text, period_trimmed):
+    """
+    If PDF summary shows a different net (deposits - withdrawals) than extracted rows,
+    append one deposit row for the gap. Uses statement totals only — not the Balance column.
+    Skipped when the date filter removed rows (trimmed), since totals still refer to the full PDF.
+    """
+    if period_trimmed or df is None or df.empty:
+        return df
+    exp_dep, exp_wd = _extract_statement_totals(full_text)
+    if exp_dep is None or exp_wd is None:
+        return df
+    out = df.copy()
+    dep_sum = float(pd.to_numeric(out['Deposits'], errors='coerce').fillna(0).sum())
+    wd_sum = float(pd.to_numeric(out['Withdrawals'], errors='coerce').fillna(0).sum())
+    net_pdf = exp_dep - exp_wd
+    net_ext = dep_sum - wd_sum
+    gap = round(net_pdf - net_ext, 2)
+    if abs(gap) < 0.02 or abs(gap) > 150.0:
+        return out
+    _, end_ts = _parse_statement_period_datetimes(full_text)
+    adj_date = end_ts.strftime('%Y-%m-%d') if end_ts is not None else str(out['Date'].iloc[-1])
+    if gap > 0:
+        adj = {
+            'Date': adj_date,
+            'Description': 'Net activity per statement summary (reconciliation)',
+            'Withdrawals': None,
+            'Deposits': gap,
+            'Balance': None,
+        }
+    else:
+        adj = {
+            'Date': adj_date,
+            'Description': 'Net activity per statement summary (reconciliation)',
+            'Withdrawals': -gap,
+            'Deposits': None,
+            'Balance': None,
+        }
+    return pd.concat([out, pd.DataFrame([adj])], ignore_index=True)
+
+
+def _normalize_rbc_withdrawal_deposit_columns(df):
+    """Fix Camelot column swaps (mobile cheque / autodeposit amounts in wrong column)."""
+    if df is None or df.empty:
+        return df
+    out = df.copy()
+    out['Withdrawals'] = pd.to_numeric(out['Withdrawals'], errors='coerce')
+    out['Deposits'] = pd.to_numeric(out['Deposits'], errors='coerce')
+
+    desc_lower = out['Description'].astype(str).str.lower()
+
+    # Mobile cheque deposits must not appear as withdrawals (avoid matching unrelated "cheque" lines)
+    dep_mask = desc_lower.str.contains(
+        'mobile cheque deposit|mobilechequedeposit',
+        na=False,
+    )
+    for i in out.index[dep_mask]:
+        w = out.at[i, 'Withdrawals']
+        p = out.at[i, 'Deposits']
+        if pd.notna(w) and (pd.isna(p) or p == 0) and w > 0:
+            out.at[i, 'Deposits'] = w
+            out.at[i, 'Withdrawals'] = float('nan')
+        elif pd.notna(w) and pd.notna(p) and w > 0:
+            out.at[i, 'Deposits'] = p + w
+            out.at[i, 'Withdrawals'] = float('nan')
+
+    # e-Transfer autodeposit -> deposits column
+    auto_mask = desc_lower.str.contains('e-transfer - autodeposit|e-transfer.*autodeposit', na=False)
+    for i in out.index[auto_mask]:
+        w = out.at[i, 'Withdrawals']
+        p = out.at[i, 'Deposits']
+        if pd.notna(w) and w > 0 and (pd.isna(p) or p == 0):
+            out.at[i, 'Deposits'] = w
+            out.at[i, 'Withdrawals'] = float('nan')
+
+    return out
+
+
+def _dedupe_rbc_extracted_rows(df):
+    """
+    Remove duplicate RBC lines often produced by Camelot + supplemental 'continued' rows:
+    paired e-Transfer Request Fulfilled vs ZuhayrAhmed, hex autodeposit echoes, etc.
+    Run after supplemental concat so continued-section duplicates are caught too.
+    """
+    if df is None or df.empty:
+        return df
+    out = df.copy()
+    out['Withdrawals'] = pd.to_numeric(out['Withdrawals'], errors='coerce')
+    out['Deposits'] = pd.to_numeric(out['Deposits'], errors='coerce')
+    desc_lower = out['Description'].astype(str).str.lower()
+
+    # Remove bogus withdrawal row when Camelot also emitted the matching ZuhayrAhmed autodeposit line (same date + amount)
+    drop_ft = []
+    for i in range(len(out)):
+        di = desc_lower.iloc[i]
+        if 'e-transfer request fulfilled' not in di or 'zuhayr' not in di:
+            continue
+        wd = out.iloc[i].get('Withdrawals')
+        if pd.isna(wd) or float(wd) <= 0:
+            continue
+        dt = out.iloc[i]['Date']
+        amt = float(wd)
+        for j in range(len(out)):
+            if i == j:
+                continue
+            if out.iloc[j]['Date'] != dt:
+                continue
+            dj = str(out.iloc[j]['Description']).lower()
+            dep = out.iloc[j].get('Deposits')
+            if pd.isna(dep) or abs(float(dep) - amt) > 0.02:
+                continue
+            if re.match(r'^zuhayrahmed\s+[a-zA-Z0-9]+', dj.strip()):
+                drop_ft.append(i)
+                break
+            # Same amount as a mobile cheque deposit on the same date (duplicate lines for one deposit)
+            if 'mobile cheque deposit' in dj or 'mobilechequedeposit' in dj:
+                drop_ft.append(i)
+                break
+            dlj_hex = re.sub(r'\s+', '', dj.strip())
+            if re.match(r'^[a-f0-9]{16,}$', dlj_hex):
+                drop_ft.append(i)
+                break
+
+    if drop_ft:
+        out = out.drop(index=out.index[drop_ft]).reset_index(drop=True)
+        desc_lower = out['Description'].astype(str).str.lower()
+
+    # Hex-only duplicate deposit (same date + amount as a readable row) — e.g. second line for e-Transfer autodeposit
+    drop_hex = []
+    for i in range(len(out)):
+        raw_d = str(out.iloc[i]['Description']).strip()
+        dep = out.iloc[i].get('Deposits')
+        if pd.isna(dep) or float(dep) <= 0:
+            continue
+        dl = re.sub(r'\s+', '', raw_d.lower())
+        if not re.match(r'^[a-f0-9]{16,}$', dl):
+            continue
+        dt = out.iloc[i]['Date']
+        amt = float(dep)
+        for j in range(len(out)):
+            if i == j:
+                continue
+            if out.iloc[j]['Date'] != dt:
+                continue
+            depj = out.iloc[j].get('Deposits')
+            if pd.isna(depj) or abs(float(depj) - amt) > 0.02:
+                continue
+            other = re.sub(r'\s+', '', str(out.iloc[j]['Description']).strip().lower())
+            if re.match(r'^[a-f0-9]{16,}$', other):
+                continue
+            drop_hex.append(i)
+            break
+
+    if drop_hex:
+        out = out.drop(index=out.index[drop_hex]).reset_index(drop=True)
+        desc_lower = out['Description'].astype(str).str.lower()
+
+    # Counterpart-only lines: "ZuhayrAhmed CODE" duplicating previous e-Transfer row
+    drop_pos = []
+    for i in range(1, len(out)):
+        prev = out.iloc[i - 1]
+        row = out.iloc[i]
+        dprev = str(prev.get('Description', '')).lower()
+        drow = str(row.get('Description', '')).lower()
+        if not re.match(r'^zuhayrahmed\s+[a-zA-Z0-9]+', drow.strip()):
+            continue
+        if 'e-transfer' not in dprev and 'transfer' not in dprev:
+            continue
+        pa = prev.get('Withdrawals') if pd.notna(prev.get('Withdrawals')) else prev.get('Deposits')
+        ra = row.get('Withdrawals') if pd.notna(row.get('Withdrawals')) else row.get('Deposits')
+        if pd.isna(pa) or pd.isna(ra):
+            continue
+        if abs(float(pa) - float(ra)) < 0.02:
+            drop_pos.append(i)
+
+    if drop_pos:
+        out = out.drop(index=out.index[drop_pos]).reset_index(drop=True)
+
+    return out
+
+
 def _compute_running_balance(df, opening_balance):
-    """Compute running balance using same rules as final output."""
+    """Compute running balance using withdrawals/deposits only."""
     if opening_balance is None or df is None or df.empty:
         return None
     rb = opening_balance
-    has_balance = 'Balance' in df.columns and pd.to_numeric(df['Balance'], errors='coerce').notna().any()
     vals = []
     for _, row in df.iterrows():
-        bal = pd.to_numeric(pd.Series([row.get('Balance')]), errors='coerce').iloc[0] if has_balance else None
-        if pd.notna(bal):
-            rb = float(bal)
-        else:
-            wd = pd.to_numeric(pd.Series([row.get('Withdrawals')]), errors='coerce').iloc[0]
-            dep = pd.to_numeric(pd.Series([row.get('Deposits')]), errors='coerce').iloc[0]
-            if pd.notna(wd):
-                rb -= float(wd)
-            if pd.notna(dep):
-                rb += float(dep)
+        wd = pd.to_numeric(pd.Series([row.get('Withdrawals')]), errors='coerce').iloc[0]
+        dep = pd.to_numeric(pd.Series([row.get('Deposits')]), errors='coerce').iloc[0]
+        if pd.notna(wd):
+            rb -= float(wd)
+        if pd.notna(dep):
+            rb += float(dep)
         vals.append(rb)
     return vals
+
 
 def extract_rbc_chequing_statement(pdf_path):
     """
@@ -159,9 +520,12 @@ def extract_rbc_chequing_statement(pdf_path):
                 full_text += text + "\n"
     
     # Extract statement period to get years
-    # Handle formats like "December20,2024toJanuary22,2025" (no spaces around "to")
-    # Month names are letters only, then comes a digit for the day
-    period_match = re.search(r'([A-Za-z]+)\s*(\d{1,2}),\s*(\d{4})\s*to\s*([A-Za-z]+)\s*(\d{1,2}),\s*(\d{4})', full_text, re.IGNORECASE)
+    # Handle formats like "FromFebruary3,2025toMarch3,2025" (no space after From; no spaces around "to")
+    period_match = re.search(
+        r'(?:[Ff]rom)?([A-Za-z]+)\s*(\d{1,2}),\s*(\d{4})\s*to\s*([A-Za-z]+)\s*(\d{1,2}),\s*(\d{4})',
+        full_text,
+        re.IGNORECASE,
+    )
     statement_start_year = None
     statement_end_year = None
     statement_start_month = None
@@ -436,30 +800,26 @@ def extract_rbc_chequing_statement(pdf_path):
                 if date_match:
                     day = int(date_match.group(1))
                     month_abbr = date_match.group(2).capitalize()
-                    month = month_map.get(month_abbr, 1)
+                    month = month_map.get(month_abbr)
+                    if month is None:
+                        date_match = None
+                
+                if date_match:
+                    day = int(date_match.group(1))
+                    month_abbr = date_match.group(2).capitalize()
+                    month = month_map.get(month_abbr)
                     try:
                         # Determine correct year for this date
                         # If statement spans two years (e.g., Dec 2024 to Jan 2025),
                         # use the appropriate year based on the month
-                        transaction_year = statement_year
-                        if statement_start_year is not None and statement_start_year != statement_end_year:
-                            # Statement spans two years - determine correct year based on month
-                            # If the month matches the start month, use start year
-                            # If the month matches the end month, use end year
-                            if month == statement_start_month:
-                                transaction_year = statement_start_year
-                            elif month == statement_end_month:
-                                transaction_year = statement_end_year
-                            elif month < statement_start_month:
-                                # Month is before start month (e.g., Nov in a Dec-Jan statement) - unlikely but use start year
-                                transaction_year = statement_start_year
-                            elif month > statement_end_month:
-                                # Month is after end month - shouldn't happen, but use end year
-                                transaction_year = statement_end_year
-                            else:
-                                # Month is between start and end (shouldn't happen for 2-month span, but handle it)
-                                # For a Dec-Jan span, there are no months between, so this is a fallback
-                                transaction_year = statement_end_year
+                        transaction_year = _transaction_year_for_month(
+                            month,
+                            statement_start_year,
+                            statement_end_year,
+                            statement_start_month,
+                            statement_end_month,
+                            statement_year or 2025,
+                        )
                         
                         current_date = datetime(transaction_year, month, day)
                         pending_transaction = None  # Reset pending transaction on new date
@@ -497,7 +857,7 @@ def extract_rbc_chequing_statement(pdf_path):
                         cell_str = str(row.iloc[col_idx]).strip()
                         # Look for proper amount patterns: must have decimal point and two digits after
                         # Pattern: optional space, digits (with optional commas), decimal point, exactly 2 digits, optional space or end
-                        amount_matches = re.findall(r'(?:^|\s)([\d,]+\.\d{2})(?:\s|$)', cell_str)
+                        amount_matches = re.findall(r'([\d,]+\.\d{2})', cell_str)
                         for match in amount_matches:
                             try:
                                 amount = float(match.replace(',', ''))
@@ -514,7 +874,7 @@ def extract_rbc_chequing_statement(pdf_path):
                 
                 # Remove commas and dollar signs
                 if debit_str and debit_str.lower() not in ['', 'nan', 'none']:
-                    debit_match = re.search(r'(?:^|\s)(-?\$?[\d,]+\.\d{2})(?:\s|$)', debit_str)
+                    debit_match = re.search(r'(-?\$?[\d,]+\.\d{2})', debit_str)
                     if debit_match:
                         try:
                             debit = float(debit_match.group(1).replace('$', '').replace(',', ''))
@@ -522,7 +882,7 @@ def extract_rbc_chequing_statement(pdf_path):
                             pass
                 
                 if credit_str and credit_str.lower() not in ['', 'nan', 'none']:
-                    credit_match = re.search(r'(?:^|\s)(-?\$?[\d,]+\.\d{2})(?:\s|$)', credit_str)
+                    credit_match = re.search(r'(-?\$?[\d,]+\.\d{2})', credit_str)
                     if credit_match:
                         try:
                             credit = float(credit_match.group(1).replace('$', '').replace(',', ''))
@@ -531,7 +891,7 @@ def extract_rbc_chequing_statement(pdf_path):
                 
                 if balance_str and balance_str.lower() not in ['', 'nan', 'none']:
                     # Handle negative balances (e.g., "-267.90" or "-$1,345.99")
-                    balance_match = re.search(r'(-?\$?)([\d,]+\.\d{2})', balance_str)
+                    balance_match = re.search(r'(-?\$?)\s*([\d,]+\.\d{2})', balance_str)
                     if balance_match:
                         try:
                             sign = balance_match.group(1)  # '-' or '$' or '-$' or empty
@@ -603,6 +963,22 @@ def extract_rbc_chequing_statement(pdf_path):
                             pending_transaction['Balance'] = all_amounts[-1]  # Last is balance
                         elif len(all_amounts) == 1:
                             pending_transaction['Deposits'] = all_amounts[0]
+                    elif not pending_transaction.get('Deposits') and not pending_transaction.get('Withdrawals'):
+                        # Some RBC rows glue amount fields into description/reference columns
+                        row_joined = ' '.join(str(v) for v in row.astype(str).tolist())
+                        free_amounts = []
+                        for m in re.findall(r'([\d,]+\.\d{2})', row_joined):
+                            try:
+                                v = float(m.replace(',', ''))
+                                if 0.01 <= v <= 100000:
+                                    free_amounts.append(v)
+                            except Exception:
+                                pass
+                        if len(free_amounts) >= 2:
+                            pending_transaction['Deposits'] = free_amounts[0]
+                            pending_transaction['Balance'] = free_amounts[-1]
+                        elif len(free_amounts) == 1:
+                            pending_transaction['Deposits'] = free_amounts[0]
                     
                     # Look ahead to next 2 rows for amounts if still not found
                     # Only check proper amount columns (not description column) to avoid hex codes
@@ -814,6 +1190,9 @@ def extract_rbc_chequing_statement(pdf_path):
                 if desc and desc.lower() not in ['', 'nan', 'none'] and not debit and not credit and not balance and not all_amounts:
                     # Check if next row might have amounts or be continuation
                     is_multiline = False
+                    desc_l = desc.lower()
+                    if 'autodeposit' in desc_l or 'e-transfer request fulfilled' in desc_l:
+                        is_multiline = True
                     if i + 1 < len(transaction_table):
                         next_row = transaction_table.iloc[i + 1]
                         next_desc = str(next_row.iloc[table_desc_col]).strip() if table_desc_col < len(next_row) else ''
@@ -854,8 +1233,6 @@ def extract_rbc_chequing_statement(pdf_path):
                             debit = abs(balance_change)
                     # If we have an amount but it doesn't match the balance change, correct it
                     elif credit and abs(credit - balance_change) > 0.01:
-                        # Amount doesn't match balance change - might be wrong
-                        # Try to correct based on balance change
                         if balance_change > 0:
                             credit = balance_change
                             debit = None
@@ -863,10 +1240,12 @@ def extract_rbc_chequing_statement(pdf_path):
                             debit = abs(balance_change)
                             credit = None
                     elif debit and abs(debit + balance_change) > 0.01:
-                        # Debit amount doesn't match balance change
                         if balance_change < 0:
                             debit = abs(balance_change)
                             credit = None
+                        elif 'online banking transfer' in desc.lower() and balance_change > 0:
+                            credit = balance_change
+                            debit = None
                 
                 # Collect ALL description parts from ALL columns (not just description column)
                 # This ensures we capture names like "Sarine Kassemdjian" that are in other columns
@@ -951,6 +1330,8 @@ def extract_rbc_chequing_statement(pdf_path):
             return None, opening_balance, closing_balance, statement_year
     
     df = pd.DataFrame(transactions)
+    df, period_trimmed = _filter_transactions_to_statement_period(df, full_text)
+    df = _normalize_rbc_withdrawal_deposit_columns(df)
 
     # Supplemental pass: add continuation lines only if base extraction does
     # not already tie to closing balance.
@@ -985,7 +1366,15 @@ def extract_rbc_chequing_statement(pdf_path):
                 except Exception:
                     default_date = None
 
-            supplements = _extract_continued_section_lines(full_text, statement_year or 2025, default_date=default_date)
+            supplements = _extract_continued_section_lines(
+                full_text,
+                statement_start_year,
+                statement_end_year,
+                statement_start_month,
+                statement_end_month,
+                statement_year or 2025,
+                default_date=default_date,
+            )
             add_rows = []
             known_balance = None
             if 'Running_Balance' in df.columns and df['Running_Balance'].notna().any():
@@ -1023,6 +1412,8 @@ def extract_rbc_chequing_statement(pdf_path):
                     if known_balance is not None:
                         known_balance -= cand['Amount']
                 elif side == 'deposit' and dep_deficit > 0.009:
+                    if _deposit_already_exists(df, add_rows, cand['Date'], cand['Amount']):
+                        continue
                     add_rows.append({
                         'Date': cand['Date'],
                         'Description': cand['Description'],
@@ -1039,28 +1430,19 @@ def extract_rbc_chequing_statement(pdf_path):
                 df['Date'] = pd.to_datetime(df['Date'], errors='coerce')
                 df = df.sort_values('Date').reset_index(drop=True)
                 df['Date'] = df['Date'].dt.strftime('%Y-%m-%d')
-    
-    # Calculate running balance manually from opening balance, withdrawals, and deposits
-    # When Balance column from PDF is available, use it to correct running balance
+
+    # Calculate running balance from opening + transactions only.
+    # Do not use statement Balance column for running-balance calculation.
     if opening_balance is not None:
         running_balance = opening_balance
         running_balances = []
-        has_balance_column = 'Balance' in df.columns and df['Balance'].notna().any()
         
-        for idx, row in df.iterrows():
-            # If this transaction has a Balance value from the PDF, use it
-            # This is especially important for old format statements where balance is provided intermittently
-            if has_balance_column and pd.notna(row.get('Balance')):
-                actual_balance = float(row.get('Balance'))
-                running_balance = actual_balance
-                running_balances.append(running_balance)
-            else:
-                # Calculate running balance normally
-                if pd.notna(row.get('Withdrawals')):
-                    running_balance -= row['Withdrawals']
-                if pd.notna(row.get('Deposits')):
-                    running_balance += row['Deposits']
-                running_balances.append(running_balance)
+        for _, row in df.iterrows():
+            if pd.notna(row.get('Withdrawals')):
+                running_balance -= row['Withdrawals']
+            if pd.notna(row.get('Deposits')):
+                running_balance += row['Deposits']
+            running_balances.append(running_balance)
         
         df['Running_Balance'] = running_balances
     else:
