@@ -163,8 +163,8 @@ python batch_predict.py transactions.xlsx
 
 ## Supported Banks & Credit Cards
 
-- **Bank accounts:** TD, Scotiabank, Tangerine, CIBC, National Bank, RBC Chequing, BMO  
-- **Credit cards:** TD Visa, Scotia Visa, RBC Mastercard, BMO Credit Card, National Bank Company Credit Card, AMEX (Amex Bank of Canada)  
+- **Bank accounts:** TD, Scotiabank, Tangerine, CIBC, National Bank, RBC Chequing, BMO, Meridian  
+- **Credit cards:** TD Visa, Scotia Visa, RBC Mastercard, BMO Credit Card, National Bank Company Credit Card, AMEX (Amex Bank of Canada), Neo Financial  
 - **Generic fallback** for other table-based PDF statements.
 
 ---

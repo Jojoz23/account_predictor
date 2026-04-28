@@ -117,7 +117,7 @@ def main():
         "Drag and drop PDF files here (or click to browse)",
         type=['pdf'],
         accept_multiple_files=True,
-        help="Supports RBC, TD, BMO, Scotiabank, CIBC, Tangerine, National Bank, AMEX • Upload multiple files at once",
+        help="Supports RBC, TD, BMO, Scotiabank, CIBC, Tangerine, National Bank, Meridian, AMEX, Neo Financial • Upload multiple files at once",
         key=uploader_key
     )
     
@@ -216,7 +216,7 @@ def main():
         st.divider()
         st.info("Upload PDF bank or credit card statements above to get started")
         st.markdown("""
-        **Supported:** RBC, TD, BMO, Scotiabank, CIBC, Tangerine, National Bank, AMEX (bank & credit card)  
+        **Supported:** RBC, TD, BMO, Scotiabank, CIBC, Tangerine, National Bank, Meridian, AMEX, Neo Financial (bank & credit card)  
         **Download:** Excel + QuickBooks IIF (same IIF script as `excel_to_iif.py` — works for both account types)
         """)
     
